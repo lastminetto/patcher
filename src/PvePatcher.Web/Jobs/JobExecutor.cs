@@ -39,7 +39,13 @@ public sealed class JobExecutor(
         var key = job.Vm!.Value;
         var vm = await store.GetVmAsync(key) ?? throw new JobFailedException("VM não encontrada.");
         var cluster = (await store.GetClusterAsync(key.ClusterId))?.ToConfig() ?? throw new JobFailedException("Cluster não encontrado.");
-        var sec = vm.Findings.Where(f => f.Status == FindingStatus.FixedByPendingUpdate).Select(f => f.Package).Distinct().ToList();
+        // Leva todos os binários pendentes do mesmo pacote-fonte (ex.: openssl + libssl3), senão o upgrade
+        // de um só deixa os irmãos na versão vulnerável ou quebra dependências de versão exata.
+        var fixable = vm.Findings.Where(f => f.Status == FindingStatus.FixedByPendingUpdate).ToList();
+        var fixableSources = fixable.Select(f => f.SourcePackage).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var sec = fixable.Select(f => f.Package)
+            .Concat((vm.Scan?.Pending ?? []).Where(p => fixableSources.Contains(p.SourceName)).Select(p => p.Name))
+            .Distinct(StringComparer.Ordinal).ToList();
         var orchestrator = new UpgradeOrchestrator(pve, sessions, updater, scanner, time, UpgradeTimings.Default);
         var r = await orchestrator.RunAsync(new UpgradeContext(cluster, key, vm.Node, job.RequestedBy, job.Upgrade!, sec), job.Log, ct);
         return r.Message;

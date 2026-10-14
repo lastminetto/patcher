@@ -87,7 +87,9 @@ public sealed class VmScanService(
             var th = settings.Current.Thresholds;
             log($"{scan.Installed.Count} pacotes instalados, {scan.Pending.Count} atualização(ões) pendente(s). Cruzando com CVEs...");
             var findings = await matcher.MatchAsync(scan, th, ct);
-            var cves = findings.Select(f => f.CveId).Distinct().ToList();
+            // Só as corrigíveis vão ao NVD: as Unfixed do Debian passam de centenas por host e, no rate limit
+            // sem key (5 req/30 s), travariam a fila serial por horas.
+            var cves = findings.Where(f => f.Status != FindingStatus.Unfixed).Select(f => f.CveId).Distinct().ToList();
             if (cves.Count > 0)
             {
                 try
