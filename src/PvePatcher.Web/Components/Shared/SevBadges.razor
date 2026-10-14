@@ -1,0 +1,20 @@
+@if (Critical + High + Medium + Low == 0)
+{
+    <span class="muted">—</span>
+}
+else
+{
+    @if (Critical > 0) { <span class="badge b-crit" title="Críticas corrigíveis">Crítica @Critical</span> }
+    @if (High > 0) { <span class="badge b-high" title="Altas corrigíveis">Alta @High</span> }
+    @if (Medium > 0) { <span class="badge b-med" title="Médias corrigíveis">Média @Medium</span> }
+    @if (Low > 0) { <span class="badge b-low" title="Baixas corrigíveis">Baixa @Low</span> }
+}
+@if (Kev > 0) { <span class="badge b-kev" title="Exploradas ativamente (CISA KEV)">KEV @Kev</span> }
+
+@code {
+    [Parameter] public int Critical { get; set; }
+    [Parameter] public int High { get; set; }
+    [Parameter] public int Medium { get; set; }
+    [Parameter] public int Low { get; set; }
+    [Parameter] public int Kev { get; set; }
+}

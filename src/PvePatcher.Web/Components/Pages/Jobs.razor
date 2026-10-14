@@ -1,0 +1,95 @@
+@page "/jobs"
+@attribute [Authorize(Policy = "View")]
+@inherits LiveComponentBase
+@inject JobQueue Queue
+@inject CurrentUser Who
+@inject OperationsService Ops
+
+<PageTitle>Fila — pve-patcher</PageTitle>
+<h1>Fila de jobs</h1>
+<p class="muted">Um job por vez (scans e atualizações). Cancelar um job em andamento só é possível para scans.</p>
+
+@if (_msg is not null) { <div class="alert err">@_msg</div> }
+
+@{
+    var jobs = Queue.Snapshot();
+    var current = jobs.FirstOrDefault(j => j.Status == JobStatus.Running);
+    var pending = jobs.Where(j => j.Status == JobStatus.Pending).ToList();
+    var done = jobs.Where(j => j.Status is JobStatus.Succeeded or JobStatus.Failed or JobStatus.Cancelled).OrderByDescending(j => j.FinishedAt).ToList();
+    var shown = jobs.FirstOrDefault(j => j.Id == _view) ?? current ?? done.FirstOrDefault();
+}
+
+<h2>Em andamento</h2>
+@if (current is null)
+{
+    <p class="muted">Nenhum job rodando.</p>
+}
+else
+{
+    <div class="panel row">
+        <div class="grow"><b>@current.Title</b> <span class="muted">por @current.RequestedBy, iniciado @Fmt.Relative(current.StartedAt, Time.GetUtcNow())</span></div>
+        @if (current.CancelableWhileRunning) { <button class="danger small" @onclick="() => Cancel(current)">Cancelar</button> }
+        else { <span class="muted">upgrade em andamento não pode ser cancelado</span> }
+    </div>
+}
+
+<h2>Pendentes (@pending.Count)</h2>
+@if (pending.Count > 0)
+{
+    <div class="tablewrap"><table>
+        <thead><tr><th>#</th><th>Job</th><th>Pedido por</th><th>Opções</th><th></th></tr></thead>
+        <tbody>
+        @for (var i = 0; i < pending.Count; i++)
+        {
+            var j = pending[i];
+            <tr><td>@(i + 1)</td><td>@j.Title@(j.Scheduled ? " (agendado)" : "")</td><td>@j.RequestedBy</td><td>@Options(j)</td>
+                <td class="right"><button class="small" @onclick="() => Cancel(j)">Cancelar</button></td></tr>
+        }
+        </tbody>
+    </table></div>
+}
+
+<h2>Log</h2>
+@if (shown is null)
+{
+    <p class="muted">Sem jobs ainda.</p>
+}
+else
+{
+    <p class="muted">@shown.Title — @shown.Status @shown.Message</p>
+    <pre class="log" id="joblog">@shown.Text()</pre>
+}
+
+<h2>Recentes</h2>
+<div class="tablewrap"><table>
+    <thead><tr><th>Job</th><th>Resultado</th><th>Fim</th><th></th></tr></thead>
+    <tbody>
+    @foreach (var j in done)
+    {
+        <tr><td>@j.Title</td>
+            <td><span class="badge @(j.Status == JobStatus.Succeeded ? "b-ok" : j.Status == JobStatus.Failed ? "b-err" : "b-off")">@j.Status</span> @j.Message</td>
+            <td class="nowrap">@Fmt.Relative(j.FinishedAt, Time.GetUtcNow())</td>
+            <td><button class="small" @onclick="() => _view = j.Id">log</button></td></tr>
+    }
+    </tbody>
+</table></div>
+
+@code {
+    private UserInfo? _user;
+    private Guid _view;
+    private string? _msg;
+
+    protected override bool ListenToLogs => true;
+
+    protected override async Task OnInitializedAsync() => _user = await Who.GetAsync();
+
+    private static string Options(Job j) => j.Upgrade is { } u
+        ? $"snapshot: {(u.Snapshot ? "sim" : "não")}, reboot: {(u.Reboot ? "sim" : "não")}, só segurança: {(u.SecurityOnly ? "sim" : "não")}"
+        : "";
+
+    private void Cancel(Job j)
+    {
+        try { _msg = null; Ops.Cancel(_user!, j.Id); }
+        catch (Exception ex) { _msg = ex.Message; }
+    }
+}

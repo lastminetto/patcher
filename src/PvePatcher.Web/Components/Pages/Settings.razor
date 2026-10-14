@@ -1,0 +1,266 @@
+@page "/settings"
+@attribute [Authorize(Policy = "Admin")]
+@inherits LiveComponentBase
+@inject StateStore Store
+@inject SettingsService SettingsSvc
+@inject SecretsService Secrets
+@inject DiscoveryService Discovery
+@inject OperationsService Ops
+@inject CurrentUser Who
+@inject VaultMonitor Vault
+@inject IVulnFeedUpdater Feeds
+@inject NavigationManager Nav
+@inject IConfiguration Config
+@inject SchedulerService Scheduler
+@inject IBootstrapScriptProvider Bootstrap
+
+<PageTitle>Configurações — pve-patcher</PageTitle>
+<h1>Configurações</h1>
+
+@if (_msg is not null) { <div class="alert @(_msgErr ? "err" : "ok")">@_msg</div> }
+
+<h2>Cofre e base de CVEs</h2>
+<div class="panel">
+    <p>Cofre: <span class="badge @(Vault.IsReady ? "b-ok" : "b-err")">@Vault.Current.State</span> <span class="muted">@Vault.Current.Detail</span></p>
+    <div class="tablewrap"><table>
+        <thead><tr><th>Feed</th><th>Atualizado</th><th class="num">Registros</th><th>Erro</th></tr></thead>
+        <tbody>
+        @foreach (var f in _feeds) { <tr><td>@f.Name</td><td>@Fmt.Date(f.UpdatedAt)</td><td class="num">@f.Records</td><td>@f.LastError</td></tr> }
+        @if (_feeds.Count == 0) { <tr><td colspan="4" class="muted">Sem informação de feeds.</td></tr> }
+        </tbody>
+    </table></div>
+    <div class="row" style="margin-top:.6rem"><button @onclick="UpdateFeedsAsync">Atualizar base de CVEs</button></div>
+    <label class="field" style="margin-top:.6rem"><span>Chave de API do NVD (@SecretStatus(_nvdExists, SecretsService.MarkNvd); o valor nunca é exibido)</span>
+        <input type="password" @bind="_nvdKey" autocomplete="off" placeholder="nova chave" /></label>
+    <button @onclick="SaveNvdAsync" disabled="@string.IsNullOrWhiteSpace(_nvdKey)">Gravar no cofre</button>
+</div>
+
+<h2>Clusters Proxmox</h2>
+<div class="tablewrap"><table>
+    <thead><tr><th>Id</th><th>Nome</th><th>Endpoints</th><th>Token (cofre)</th><th>Discovery</th><th></th></tr></thead>
+    <tbody>
+    @foreach (var c in _clusters)
+    {
+        <tr>
+            <td class="mono">@c.Id</td><td>@c.Name</td><td class="mono">@string.Join(", ", c.Endpoints)</td>
+            <td>@SecretStatus(_tokenExists.GetValueOrDefault(c.Id), SecretsService.MarkCluster(c.Id))</td>
+            <td>@if (c.LastDiscoveryError is not null) { <span class="badge b-err" title="@c.LastDiscoveryError">erro</span> } else { @Fmt.Relative(c.LastDiscoveryAt, Time.GetUtcNow()) }</td>
+            <td class="right nowrap">
+                <button class="small" @onclick="() => TestAsync(c)">Testar</button>
+                <button class="small" @onclick="() => EditCluster(c)">Editar</button>
+                <button class="small danger" @onclick="() => DeleteClusterAsync(c)">Remover</button>
+            </td>
+        </tr>
+    }
+    </tbody>
+</table></div>
+
+<div class="panel" style="margin-top:1rem">
+    <h3>@(_editing ? "Editar cluster" : "Novo cluster")</h3>
+    <label class="field"><span>Id (slug, usado no cofre)</span><input type="text" @bind="_cId" disabled="@_editing" placeholder="prod" /></label>
+    <label class="field"><span>Nome</span><input type="text" @bind="_cName" /></label>
+    <label class="field"><span>Endpoints (um por linha, ex.: https://172.22.1.10:8006)</span><textarea rows="3" @bind="_cEndpoints"></textarea></label>
+    <label class="field"><span>Fingerprints SHA-256 dos certificados (uma impressão SHA-256 por nó, saída do pve-role.sh; vazio = validar pela cadeia do sistema)</span><textarea rows="3" @bind="_cFp"></textarea></label>
+    <button class="primary" @onclick="SaveClusterAsync">Salvar cluster</button>
+    @if (_editing) { <button @onclick="ResetClusterForm">Cancelar</button> }
+
+    @if (_editing)
+    {
+        <h3>Token de API (gravado no cofre)</h3>
+        <label class="field"><span>token_id (user@realm!nome)</span><input type="text" @bind="_tId" autocomplete="off" /></label>
+        <label class="field"><span>token_secret</span><input type="password" @bind="_tSecret" autocomplete="off" /></label>
+        <button @onclick="SaveTokenAsync" disabled="@(string.IsNullOrWhiteSpace(_tId) || string.IsNullOrWhiteSpace(_tSecret))">Gravar token</button>
+    }
+</div>
+
+<h2>Chave SSH padrão</h2>
+<div class="panel">
+    <p>Chave privada: @SecretStatus(_sshExists, SecretsService.MarkSsh) <span class="muted">(o valor nunca é exibido)</span></p>
+    @if (_pub is not null)
+    {
+        <p>Chave pública:</p><code class="cmd">@_pub</code>
+        <p style="margin-top:.8rem">Comando para preparar uma VM (rode como root na VM):</p>
+        <code class="cmd">@Bootstrap.Command(BaseUrl + "/bootstrap-vm.sh", _pub, _s.SshUser, null)</code>
+    }
+    <div class="row" style="margin-top:.8rem">
+        <button @onclick="GenerateKeyAsync" disabled="@_busy">Gerar novo par ed25519</button>
+        <span class="muted">Substitui a chave atual; VMs já preparadas precisarão da nova pública.</span>
+    </div>
+    <details><summary>Colar uma chave existente</summary>
+        <label class="field"><span>Chave privada (OpenSSH/PEM)</span><textarea rows="5" @bind="_pastePriv"></textarea></label>
+        <label class="field"><span>Chave pública (para exibição/bootstrap)</span><input type="text" @bind="_pastePub" style="max-width:100%" /></label>
+        <label class="field"><span>Passphrase (se houver)</span><input type="password" @bind="_pastePass" autocomplete="off" /></label>
+        <button @onclick="PasteKeyAsync" disabled="@string.IsNullOrWhiteSpace(_pastePriv)">Gravar no cofre</button>
+    </details>
+</div>
+
+<h2>Agendamento e geral</h2>
+<div class="panel">
+    <label class="field"><span>Usuário SSH nas VMs</span><input type="text" @bind="_s.SshUser" /></label>
+    <label class="field"><span>Redes preferidas para escolher o IP (CIDR, uma por linha)</span><textarea rows="3" @bind="_nets"></textarea></label>
+    <label class="field"><span>Scan agendado (cron de 5 campos)</span><input type="text" @bind="_s.ScanCron" /></label>
+    <label class="field"><span>Fuso horário</span><input type="text" @bind="_s.TimeZone" /></label>
+    <label style="display:block;margin-bottom:.6rem"><input type="checkbox" @bind="_s.ScanEnabled" /> scan agendado ligado (próximo: @(Scheduler.NextRun() is { } n ? Fmt.Date(n, _s.TimeZone) : "—"))</label>
+    <label class="field"><span>Intervalo do discovery (minutos)</span><input type="number" @bind="_s.DiscoveryMinutes" min="1" /></label>
+    <h3>Limiares de severidade</h3>
+    <div class="row">
+        <label>Crítica CVSS ≥ <input type="number" step="0.1" @bind="_s.CriticalCvss" style="width:5rem" /></label>
+        <label>Alta CVSS ≥ <input type="number" step="0.1" @bind="_s.HighCvss" style="width:5rem" /></label>
+        <label>Alta se EPSS ≥ <input type="number" step="0.05" @bind="_s.HighEpss" style="width:5rem" /></label>
+        <label>Média CVSS ≥ <input type="number" step="0.1" @bind="_s.MediumCvss" style="width:5rem" /></label>
+    </div>
+    <p class="muted">Os limiares valem para os próximos scans.</p>
+    <button class="primary" @onclick="SaveGeneralAsync">Salvar</button>
+</div>
+
+@code {
+    private AppSettings _s = new();
+    private List<ClusterEntity> _clusters = [];
+    private List<FeedState> _feeds = [];
+    private Dictionary<string, bool?> _tokenExists = [];
+    private bool? _nvdExists, _sshExists;
+    private string? _pub, _msg;
+    private bool _msgErr, _editing, _busy;
+    private string _nets = "", _nvdKey = "", _pastePriv = "", _pastePub = "", _pastePass = "";
+    private string _cId = "", _cName = "", _cEndpoints = "", _cFp = "", _tId = "", _tSecret = "";
+    private UserInfo? _user;
+
+    private string BaseUrl => Config["Bootstrap:PublicBaseUrl"] is { Length: > 0 } b ? b : Nav.BaseUri.TrimEnd('/');
+
+    protected override async Task OnInitializedAsync()
+    {
+        _user = await Who.GetAsync();
+        var s = SettingsSvc.Current;
+        // cópia para edição
+        _s = Data.Json.Deserialize<AppSettings>(Data.Json.Serialize(s)) ?? new AppSettings();
+        _nets = string.Join('\n', _s.PreferredNetworks);
+        await ReloadAsync();
+    }
+
+    protected override Task OnLiveRefreshAsync() => ReloadAsync();
+
+    private async Task ReloadAsync()
+    {
+        _clusters = await Store.GetClustersAsync();
+        _tokenExists = [];
+        foreach (var c in _clusters) _tokenExists[c.Id] = await Secrets.ExistsAsync(SecretPaths.Cluster(c.Id), default);
+        _nvdExists = await Secrets.ExistsAsync(SecretPaths.Nvd, default);
+        _sshExists = await Secrets.ExistsAsync(SecretPaths.SshDefault, default);
+        _pub = await Secrets.GetSshPublicKeyAsync(default);
+        try { _feeds = (await Feeds.GetStatusAsync(default)).ToList(); } catch { _feeds = []; }
+    }
+
+    private string SecretStatus(bool? exists, string mark)
+    {
+        if (exists is null) return "indisponível (cofre)";
+        if (exists == false) return "não definido";
+        return SettingsSvc.Current.SecretsSetAt.TryGetValue(mark, out var d) ? $"definido em {Fmt.Date(d)}" : "definido";
+    }
+
+    private void Say(string m, bool err = false) { _msg = m; _msgErr = err; }
+
+    private async Task Guard(Func<Task> action)
+    {
+        try
+        {
+            OperationsService.Require(_user?.CanAdmin == true, "é preciso Sys.Modify");
+            await action();
+        }
+        catch (VaultUnavailableException) { Say(VaultMessages.Sealed, true); }
+        catch (Exception ex) { Say(ex.Message, true); }
+        await ReloadAsync();
+    }
+
+    private Task UpdateFeedsAsync() => Guard(() =>
+    {
+        Say(Ops.EnqueueFeedUpdate(_user!) is null ? "Já há uma atualização de feeds na fila." : "Atualização de feeds enfileirada (veja a Fila).");
+        return Task.CompletedTask;
+    });
+
+    private Task SaveNvdAsync() => Guard(async () =>
+    {
+        await Secrets.SetNvdKeyAsync(_nvdKey, default);
+        _nvdKey = "";
+        Say("Chave do NVD gravada no cofre.");
+    });
+
+    private void EditCluster(ClusterEntity c)
+    {
+        _editing = true; _cId = c.Id; _cName = c.Name; _cEndpoints = string.Join('\n', c.Endpoints); _cFp = c.Fingerprint ?? "";
+        _tId = _tSecret = "";
+    }
+
+    private void ResetClusterForm()
+    {
+        _editing = false; _cId = _cName = _cEndpoints = _cFp = _tId = _tSecret = "";
+    }
+
+    private Task SaveClusterAsync() => Guard(async () =>
+    {
+        var id = _cId.Trim().ToLowerInvariant();
+        if (!System.Text.RegularExpressions.Regex.IsMatch(id, "^[a-z0-9][a-z0-9_-]{0,31}$"))
+            throw new ArgumentException("Id inválido: use letras minúsculas, números, '-' ou '_'.");
+        var eps = _cEndpoints.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+        if (eps.Count == 0 || eps.Any(e => !Uri.TryCreate(e, UriKind.Absolute, out var u) || u.Scheme != "https"))
+            throw new ArgumentException("Informe ao menos um endpoint https://host:8006.");
+        await Store.UpsertClusterAsync(new ClusterEntity
+        {
+            Id = id, Name = string.IsNullOrWhiteSpace(_cName) ? id : _cName.Trim(),
+            Endpoints = eps, Fingerprint = string.IsNullOrWhiteSpace(_cFp) ? null : string.Join(", ", System.Text.RegularExpressions.Regex.Split(_cFp.Trim(), @"[\s,]+")),
+        });
+        Say($"Cluster {id} salvo. Grave o token para habilitar o discovery.");
+        _editing = true; _cId = id;
+    });
+
+    private Task SaveTokenAsync() => Guard(async () =>
+    {
+        await Secrets.SetClusterTokenAsync(_cId, _tId, _tSecret, default);
+        _tId = _tSecret = "";
+        Say("Token gravado no cofre.");
+    });
+
+    private Task DeleteClusterAsync(ClusterEntity c) => Guard(async () =>
+    {
+        await Store.DeleteClusterAsync(c.Id);
+        try { await Secrets.DeleteClusterTokenAsync(c.Id, default); } catch (VaultUnavailableException) { }
+        Say($"Cluster {c.Name} removido (VMs e dados dele apagados).");
+    });
+
+    private Task TestAsync(ClusterEntity c) => Guard(async () =>
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        var vms = await Discovery.TestAsync(c.ToConfig(), cts.Token);
+        Say($"Conexão OK: {vms.Count} VM(s) QEMU em {vms.Select(v => v.Node).Distinct().Count()} nó(s) (dry-run, nada foi gravado).");
+    });
+
+    private Task GenerateKeyAsync() => Guard(async () =>
+    {
+        _busy = true;
+        _pub = await Secrets.GenerateSshKeyAsync(default);
+        _busy = false;
+        Say("Novo par ed25519 gerado; a privada ficou só no cofre.");
+    });
+
+    private Task PasteKeyAsync() => Guard(async () =>
+    {
+        await Secrets.SetSshKeyAsync(_pastePriv, _pastePub, _pastePass, default);
+        _pastePriv = _pastePub = _pastePass = "";
+        Say("Chave gravada no cofre.");
+    });
+
+    private Task SaveGeneralAsync() => Guard(async () =>
+    {
+        if (!CronHelper.TryParse(_s.ScanCron, out _)) throw new ArgumentException("Expressão cron inválida (5 campos).");
+        if (CronHelper.Zone(_s.TimeZone) == TimeZoneInfo.Utc && !_s.TimeZone.Equals("UTC", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("Fuso horário desconhecido.");
+        var nets = _nets.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+        if (nets.Any(n => !System.Net.IPNetwork.TryParse(n, out _))) throw new ArgumentException("CIDR inválido nas redes preferidas.");
+        if (string.IsNullOrWhiteSpace(_s.SshUser)) throw new ArgumentException("Usuário SSH obrigatório.");
+        _s.PreferredNetworks = nets;
+        _s.DiscoveryMinutes = Math.Max(1, _s.DiscoveryMinutes);
+        var live = SettingsSvc.Current;
+        _s.SecretsSetAt = live.SecretsSetAt;
+        await SettingsSvc.SaveAsync(_s);
+        Say("Configurações salvas.");
+    });
+}

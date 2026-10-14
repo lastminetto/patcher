@@ -1,0 +1,263 @@
+@page "/vm/{ClusterId}/{VmId:int}"
+@attribute [Authorize(Policy = "View")]
+@inherits LiveComponentBase
+@inject StateStore Store
+@inject CurrentUser Who
+@inject OperationsService Ops
+@inject VmIpService Ips
+@inject JobQueue Queue
+
+<PageTitle>@(_vm?.Name ?? "VM") — pve-patcher</PageTitle>
+
+@if (_vm is null)
+{
+    <h1>VM não encontrada</h1>
+    <p><a href="">Voltar</a></p>
+    return;
+}
+
+@{
+    var ip = Ips.Resolve(_vm)?.ToString();
+    var st = VmStatusRules.Describe(VmStatusRules.Compute(_vm, ip is not null));
+    var scan = _vm.Scan;
+    var findings = _vm.Findings;
+    var job = Queue.Snapshot().LastOrDefault(j => j.Vm == _vm.Key && j.Status is JobStatus.Pending or JobStatus.Running)
+              ?? Queue.Snapshot().LastOrDefault(j => j.Vm == _vm.Key);
+}
+
+<div class="row">
+    <h1 style="margin:0">@_vm.Name <span class="muted">#@_vm.VmId</span></h1>
+    <span class="badge @st.Css">@st.Text</span>
+    @if (_vm.RebootRequired) { <span class="badge b-warn">reboot pendente</span> }
+    <span class="grow"></span>
+    <button @onclick="ScanAsync" disabled="@(!_can)">Escanear</button>
+    <button class="primary" @onclick="() => _dialog = true" disabled="@(!_can)">Atualizar…</button>
+</div>
+
+@if (_msg is not null) { <div class="alert @(_msgErr ? "err" : "ok")">@_msg</div> }
+@if (!_can)
+{
+    <div class="alert">Somente leitura: ações exigem <code>VM.PowerMgmt</code> nesta VM e login no cluster dela (@_vm.ClusterId).</div>
+}
+@if (_vm.State == ScanState.HostKeyChanged)
+{
+    <div class="alert err">
+        <b>A host key do SSH mudou.</b> Scans e atualizações estão bloqueados.<br />
+        Conhecida: <code>@_vm.KnownHostKey</code><br />
+        Apresentada: <code>@_vm.PendingHostKey</code><br />
+        Confirme que a mudança é legítima (reinstalação da VM, por exemplo) antes de aceitar.
+        <div class="row" style="margin-top:.5rem"><button @onclick="AcceptKeyAsync" disabled="@(!_can)">Aceitar nova chave</button></div>
+    </div>
+}
+else if (_vm.LastError is not null && _vm.State == ScanState.Error)
+{
+    <div class="alert err">Último erro: @_vm.LastError</div>
+}
+
+<div class="panel">
+    <dl class="kv">
+        <dt>Cluster / nó</dt><dd>@_vm.ClusterId / @_vm.Node (@_vm.Status)</dd>
+        <dt>Sistema</dt><dd>@(_vm.Os?.PrettyName ?? "desconhecido")@(scan is null ? "" : " — kernel " + scan.Kernel)</dd>
+        <dt>IP efetivo</dt><dd class="mono">@(ip ?? "—") : @_vm.SshPort</dd>
+        <dt>Último scan</dt><dd>@Fmt.Date(_vm.LastScanAt) (@Fmt.Relative(_vm.LastScanAt, Time.GetUtcNow()))</dd>
+        <dt>CVEs corrigíveis</dt><dd><SevBadges Critical="_vm.CriticalFixable" High="_vm.HighFixable" Medium="_vm.MediumFixable" Low="_vm.LowFixable" Kev="_vm.KevFixable" /></dd>
+    </dl>
+</div>
+
+<div class="tabs">
+    @foreach (var (key, label) in Tabs)
+    {
+        <button class="@(_tab == key ? "on" : "")" @onclick="() => _tab = key">@label</button>
+    }
+</div>
+
+@if (_tab == "pkgs")
+{
+    <div class="tablewrap"><table>
+        <thead><tr><th>Pacote</th><th>Instalada</th><th>Candidata</th><th>Held back</th><th>CVEs que corrige</th></tr></thead>
+        <tbody>
+        @foreach (var p in (scan?.Pending ?? []).OrderBy(p => p.Name))
+        {
+            var fixes = findings.Where(f => f.Package == p.Name && f.Status == FindingStatus.FixedByPendingUpdate).Select(f => f.CveId).Distinct().ToList();
+            <tr>
+                <td>@p.Name</td><td class="mono">@p.InstalledVersion</td><td class="mono">@p.CandidateVersion</td>
+                <td>@if (p.HeldBack) { <span class="badge b-warn" title="a candidata existe, mas o upgrade normal não a instala (dependência nova)">retido</span> }</td>
+                <td>@foreach (var c in fixes) { <a class="mono" href="@CveLinks.For(_vm.Distro, c)" target="_blank" rel="noopener">@c</a><text> </text> }</td>
+            </tr>
+        }
+        @if (scan is null) { <tr><td colspan="5" class="muted">Sem scan ainda.</td></tr> }
+        else if (scan.Pending.Count == 0) { <tr><td colspan="5" class="muted">Nenhuma atualização pendente.</td></tr> }
+        </tbody>
+    </table></div>
+}
+else if (_tab == "cves")
+{
+    <div class="row">
+        <span class="muted">Mostrar:</span>
+        <label><input type="checkbox" checked disabled /> corrigidas pela atualização</label>
+        <label><input type="checkbox" @bind="_showNotInCandidate" /> correção fora da candidata</label>
+        <label><input type="checkbox" @bind="_showUnfixed" /> sem correção</label>
+    </div>
+    <div class="tablewrap"><table>
+        <thead><tr><th>CVE</th><th>Pacote</th><th>Status</th><th class="num">CVSS</th><th class="num">EPSS</th><th>KEV</th><th>Severidade</th><th>Aviso</th><th>Resumo</th></tr></thead>
+        <tbody>
+        @foreach (var f in findings.Where(ShowFinding).OrderByDescending(f => f.Severity).ThenByDescending(f => f.Kev).ThenByDescending(f => f.Cvss ?? 0))
+        {
+            <tr>
+                <td class="nowrap"><a class="mono" href="@CveLinks.For(_vm.Distro, f.CveId)" target="_blank" rel="noopener">@f.CveId</a></td>
+                <td>@f.Package <span class="muted mono">@f.InstalledVersion@(f.FixedVersion is null ? "" : " → " + f.FixedVersion)</span></td>
+                <td>@Fmt.StatusName(f.Status)</td>
+                <td class="num">@Fmt.Cvss(f.Cvss)</td><td class="num">@Fmt.Percent(f.Epss)</td>
+                <td>@if (f.Kev) { <span class="badge b-kev">KEV</span> }</td>
+                <td><span class="badge @Fmt.SeverityClass(f.Severity)">@Fmt.SeverityName(f.Severity)</span></td>
+                <td class="mono">@f.AdvisoryId</td>
+                <td>@f.Summary</td>
+            </tr>
+        }
+        </tbody>
+    </table></div>
+}
+else if (_tab == "net")
+{
+    <div class="panel">
+        <h3>Escolha do IP para SSH</h3>
+        <fieldset disabled="@(!_can)" style="border:none;padding:0;margin:0">
+        <label style="display:block"><input type="radio" name="mode" checked="@(_mode == IpOverrideMode.Auto)" @onchange="() => _mode = IpOverrideMode.Auto" /> Automático (IPv4 das redes preferidas, ignorando docker/veth/bridges)</label>
+        <label style="display:block"><input type="radio" name="mode" checked="@(_mode == IpOverrideMode.Nic)" @onchange="() => _mode = IpOverrideMode.Nic" /> Usar uma NIC (escolha na tabela abaixo)</label>
+        <label style="display:block"><input type="radio" name="mode" checked="@(_mode == IpOverrideMode.Fixed)" @onchange="() => _mode = IpOverrideMode.Fixed" /> IP manual:
+            <input type="text" @bind="_fixed" placeholder="10.0.0.5" style="width:11rem" disabled="@(_mode != IpOverrideMode.Fixed)" /></label>
+        <label class="field" style="margin-top:.6rem"><span>Porta SSH</span><input type="number" @bind="_port" min="1" max="65535" style="width:7rem" /></label>
+        <button class="primary" @onclick="SaveNetworkAsync">Salvar</button>
+        </fieldset>
+        <p class="muted">IP efetivo atual: <span class="mono">@(ip ?? "nenhum (sem IP)")</span></p>
+    </div>
+    <div class="tablewrap"><table>
+        <thead><tr><th></th><th>Interface</th><th>MAC</th><th>Endereços (guest agent)</th></tr></thead>
+        <tbody>
+        @foreach (var n in _vm.Nics)
+        {
+            var val = n.Mac ?? n.Name;
+            <tr>
+                <td><input type="radio" name="nic" disabled="@(!_can || _mode != IpOverrideMode.Nic)" checked="@(_nicValue == val)" @onchange="() => _nicValue = val" /></td>
+                <td>@n.Name</td><td class="mono">@n.Mac</td>
+                <td class="mono">@string.Join(", ", n.Addresses)</td>
+            </tr>
+        }
+        @if (_vm.Nics.Count == 0) { <tr><td colspan="4" class="muted">Sem NICs: o guest agent não respondeu. Use um IP manual.</td></tr> }
+        </tbody>
+    </table></div>
+    <div class="panel" style="margin-top:1rem">
+        <h3>Host key SSH</h3>
+        <dl class="kv">
+            <dt>Conhecida</dt><dd class="mono">@(_vm.KnownHostKey ?? "ainda não gravada (será gravada na primeira conexão — TOFU)")</dd>
+            @if (_vm.PendingHostKey is not null) { <dt>Apresentada agora</dt><dd class="mono">@_vm.PendingHostKey</dd> }
+        </dl>
+    </div>
+}
+else
+{
+    var running = job is { Status: JobStatus.Pending or JobStatus.Running };
+    <p class="muted">
+        @if (job is not null && (running || _vm.LastJobLog is null))
+        {
+            <text>Job atual: @job.Title — @job.Status @job.Message</text>
+        }
+        else
+        {
+            <text>@_vm.LastJobKind em @Fmt.Date(_vm.LastJobAt): @_vm.LastJobResult</text>
+        }
+    </p>
+    <pre class="log">@(job is not null && (running || _vm.LastJobLog is null) ? job.Text() : _vm.LastJobLog ?? "Nenhuma execução registrada.")</pre>
+}
+
+@if (_dialog)
+{
+    <UpgradeDialog Vms="@([_vm])" OnCancel="() => _dialog = false" OnConfirm="UpgradeAsync" />
+}
+
+@code {
+    [Parameter] public string ClusterId { get; set; } = "";
+    [Parameter] public int VmId { get; set; }
+
+    private static readonly (string, string)[] Tabs =
+        [("pkgs", "Pacotes pendentes"), ("cves", "CVEs"), ("net", "Rede / SSH"), ("log", "Último log")];
+
+    private VmEntity? _vm;
+    private UserInfo? _user;
+    private bool _can, _dialog, _msgErr, _showUnfixed, _showNotInCandidate;
+    private string _tab = "pkgs";
+    private string? _msg;
+    private IpOverrideMode _mode;
+    private string? _nicValue, _fixed;
+    private int _port = 22;
+
+    protected override bool ListenToLogs => true;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _user = await Who.GetAsync();
+        var first = _vm is null;
+        _vm = await Store.GetVmAsync(new VmKey(ClusterId, VmId));
+        _can = _vm is not null && _user?.CanOperate(ClusterId, VmId) == true;
+        if (_vm is not null && first) LoadNetworkForm();
+    }
+
+    protected override async Task OnLiveRefreshAsync()
+    {
+        _vm = await Store.GetVmAsync(new VmKey(ClusterId, VmId));
+    }
+
+    private void LoadNetworkForm()
+    {
+        _mode = _vm!.IpOverrideMode;
+        _nicValue = _mode == IpOverrideMode.Nic ? _vm.IpOverrideValue : null;
+        _fixed = _mode == IpOverrideMode.Fixed ? _vm.IpOverrideValue : null;
+        _port = _vm.SshPort;
+    }
+
+    private bool ShowFinding(CveFinding f) => f.Status switch
+    {
+        FindingStatus.FixedByPendingUpdate => true,
+        FindingStatus.FixNotInCandidate => _showNotInCandidate,
+        _ => _showUnfixed,
+    };
+
+    private void Say(string m, bool err = false) { _msg = m; _msgErr = err; }
+
+    private void ScanAsync()
+    {
+        try
+        {
+            Say(Ops.EnqueueScan(_user!, _vm!.Key, _vm.Name) is null ? "Já existe um scan desta VM na fila." : "Scan enfileirado.");
+        }
+        catch (Exception ex) { Say(ex.Message, true); }
+    }
+
+    private void UpgradeAsync(UpgradeOptions o)
+    {
+        _dialog = false;
+        try
+        {
+            Say(Ops.EnqueueUpgrade(_user!, _vm!.Key, _vm.Name, o) is null ? "Já existe uma atualização desta VM na fila." : "Atualização enfileirada.");
+        }
+        catch (Exception ex) { Say(ex.Message, true); }
+    }
+
+    private async Task AcceptKeyAsync()
+    {
+        try { await Ops.AcceptHostKeyAsync(_user!, _vm!.Key); Say("Nova host key aceita."); }
+        catch (Exception ex) { Say(ex.Message, true); }
+    }
+
+    private async Task SaveNetworkAsync()
+    {
+        try
+        {
+            var value = _mode switch { IpOverrideMode.Nic => _nicValue, IpOverrideMode.Fixed => _fixed, _ => null };
+            await Ops.SetNetworkAsync(_user!, _vm!.Key, _mode, value, _port);
+            _vm = await Store.GetVmAsync(_vm.Key);
+            Say("Configuração de rede salva.");
+        }
+        catch (Exception ex) { Say(ex.Message, true); }
+    }
+}

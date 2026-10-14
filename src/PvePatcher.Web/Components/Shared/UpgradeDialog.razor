@@ -1,0 +1,39 @@
+<div class="modal-bg" @onclick="Cancel">
+    <div class="modal" @onclick:stopPropagation="true">
+        <h2>Atualizar @(Vms.Count == 1 ? Vms[0].Name : $"{Vms.Count} VMs")</h2>
+        @if (Vms.Count > 1)
+        {
+            <p class="muted">As VMs são atualizadas uma por vez, em fila: @string.Join(", ", Vms.Select(v => v.Name)).</p>
+        }
+        <label style="display:block;margin:.5rem 0"><input type="checkbox" @bind="_snapshot" /> Snapshot antes (mantém só o último <code>patcher-*</code>)</label>
+        <label style="display:block;margin:.5rem 0"><input type="checkbox" @bind="_reboot" /> Reiniciar se necessário</label>
+        <label style="display:block;margin:.5rem 0"><input type="checkbox" @bind="_security" /> Só pacotes de segurança (os que corrigem CVE)</label>
+        @if (_security)
+        {
+            var none = Vms.Where(v => !v.Findings.Any(f => f.Status == FindingStatus.FixedByPendingUpdate)).ToList();
+            if (none.Count > 0)
+            {
+                <div class="alert">Sem pacote de segurança pendente (o job falhará sem alterar a VM): @string.Join(", ", none.Select(v => v.Name)).</div>
+            }
+        }
+        @if (!_snapshot)
+        {
+            <div class="alert">Sem snapshot não há como reverter pelo Proxmox.</div>
+        }
+        <div class="row end">
+            <button @onclick="Cancel">Cancelar</button>
+            <button class="primary" @onclick="Confirm">Enfileirar</button>
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public List<VmEntity> Vms { get; set; } = [];
+    [Parameter] public EventCallback<UpgradeOptions> OnConfirm { get; set; }
+    [Parameter] public EventCallback OnCancel { get; set; }
+
+    private bool _snapshot = true, _reboot, _security;
+
+    private Task Confirm() => OnConfirm.InvokeAsync(new UpgradeOptions(_snapshot, _reboot, _security));
+    private Task Cancel() => OnCancel.InvokeAsync();
+}

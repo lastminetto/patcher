@@ -1,0 +1,102 @@
+@page "/login"
+@attribute [ExcludeFromInteractiveRouting]
+@attribute [AllowAnonymous]
+@using Microsoft.AspNetCore.Authentication
+@inject LoginService Logins
+@inject StateStore Store
+@inject NavigationManager Nav
+
+<PageTitle>Entrar — pve-patcher</PageTitle>
+
+<div class="login">
+    <div class="panel">
+        <h1>pve-patcher</h1>
+        <p class="muted">Entre com sua conta do Proxmox VE.</p>
+
+        @if (_error is not null) { <div class="alert err">@_error</div> }
+
+        @if (_clusters.Count == 0)
+        {
+            <div class="alert">Nenhum cluster cadastrado. Defina <code>Bootstrap:Clusters</code> em
+                <code>/etc/pve-patcher/appsettings.Production.json</code> e reinicie o serviço.</div>
+        }
+        else if (_challenge is null)
+        {
+            <EditForm Model="Input" FormName="login" OnValidSubmit="DoLoginAsync">
+                <label class="field"><span>Cluster</span>
+                    <InputSelect @bind-Value="Input.ClusterId">
+                        @foreach (var c in _clusters) { <option value="@c.Id">@c.Name</option> }
+                    </InputSelect></label>
+                <label class="field"><span>Usuário (user@realm)</span>
+                    <InputText @bind-Value="Input.UserId" placeholder="root@pam" autocomplete="username" /></label>
+                <label class="field"><span>Senha</span>
+                    <InputText type="password" @bind-Value="Input.Password" autocomplete="current-password" /></label>
+                <button class="primary" type="submit">Entrar</button>
+            </EditForm>
+        }
+        else
+        {
+            <EditForm Model="Totp" FormName="totp" OnValidSubmit="DoTotpAsync">
+                <input type="hidden" name="Totp.Challenge" value="@_challenge" />
+                <label class="field"><span>Código de verificação (TOTP)</span>
+                    <InputText @bind-Value="Totp.Code" autocomplete="one-time-code" inputmode="numeric" /></label>
+                <button class="primary" type="submit">Verificar</button>
+                <a href="/login" style="margin-left:.8rem">Voltar</a>
+            </EditForm>
+        }
+    </div>
+</div>
+
+@code {
+    [CascadingParameter] private HttpContext? Http { get; set; }
+    [SupplyParameterFromQuery] private string? ReturnUrl { get; set; }
+    [SupplyParameterFromForm(FormName = "login")] private LoginModel Input { get; set; } = default!;
+    [SupplyParameterFromForm(FormName = "totp")] private TotpModel Totp { get; set; } = default!;
+
+    private List<ClusterEntity> _clusters = [];
+    private string? _challenge;
+    private string? _error;
+
+    public sealed class LoginModel { public string ClusterId { get; set; } = ""; public string UserId { get; set; } = ""; public string Password { get; set; } = ""; }
+    public sealed class TotpModel { public string Challenge { get; set; } = ""; public string Code { get; set; } = ""; }
+
+    protected override async Task OnInitializedAsync()
+    {
+        Input ??= new(); Totp ??= new();
+        _clusters = await Store.GetClustersAsync();
+        if (string.IsNullOrEmpty(Input.ClusterId) && _clusters.Count > 0) Input.ClusterId = _clusters[0].Id;
+        if (!string.IsNullOrEmpty(Totp.Challenge)) _challenge = Totp.Challenge;
+    }
+
+    private async Task DoLoginAsync()
+    {
+        var r = await Logins.LoginAsync(Input.ClusterId, Input.UserId, Input.Password, Http?.RequestAborted ?? default);
+        Input.Password = "";
+        await HandleAsync(r);
+    }
+
+    private async Task DoTotpAsync()
+    {
+        var r = await Logins.CompleteTotpAsync(Totp.Challenge, Totp.Code, Http?.RequestAborted ?? default);
+        await HandleAsync(r);
+    }
+
+    private async Task HandleAsync(LoginService.LoginOutcome r)
+    {
+        if (r.User is not null && Http is not null)
+        {
+            await Http.SignInAsync(r.User.ToPrincipal(), new AuthenticationProperties
+            {
+                IsPersistent = false,
+                ExpiresUtc = DateTimeOffset.UtcNow.AddHours(8),
+            });
+            var target = ReturnUrl is { Length: > 0 } u && u.StartsWith('/') && !u.StartsWith("//") ? u : "/";
+            Nav.NavigateTo(target, forceLoad: true);
+            return;
+        }
+        _challenge = r.TotpChallenge;
+        _error = r.Error;
+        Totp.Challenge = _challenge ?? "";
+        Totp.Code = "";
+    }
+}

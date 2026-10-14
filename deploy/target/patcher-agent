@@ -1,0 +1,269 @@
+#!/bin/sh
+# patcher-agent: wrapper root-owned chamado pelo usuario "patcher" via sudo.
+# Subcomandos fixos e argumentos validados: o sudoers libera SOMENTE este script.
+# POSIX sh (busybox ash incluido). Suporta apt, dnf e apk.
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+umask 022
+LC_ALL=C
+export LC_ALL
+
+PROTOCOL=1
+LOCK=/run/patcher-agent.lock
+
+die() { echo "patcher-agent: $1" >&2; exit "${2:-1}"; }
+
+detect_family() {
+    ids=$( ( . /etc/os-release 2>/dev/null; echo "${ID:-} ${ID_LIKE:-}" ) || true )
+    case " $ids " in
+        *" debian "*|*" ubuntu "*) FAMILY=apt ;;
+        *" rhel "*|*" fedora "*|*" centos "*|*" almalinux "*|*" rocky "*) FAMILY=dnf ;;
+        *" alpine "*) FAMILY=apk ;;
+        *)
+            if command -v apt-get >/dev/null 2>&1; then FAMILY=apt
+            elif command -v dnf >/dev/null 2>&1; then FAMILY=dnf
+            elif command -v apk >/dev/null 2>&1; then FAMILY=apk
+            else die "familia de distro nao suportada: $ids"; fi ;;
+    esac
+}
+
+# Evita dois refresh/upgrades simultaneos (sem flock, segue sem lock).
+take_lock() {
+    command -v flock >/dev/null 2>&1 || return 0
+    exec 9>"$LOCK"
+    flock -n 9 || die "outra execucao do patcher-agent em andamento" 75
+}
+
+apt_env() {
+    DEBIAN_FRONTEND=noninteractive
+    NEEDRESTART_MODE=a
+    APT_LISTCHANGES_FRONTEND=none
+    export DEBIAN_FRONTEND NEEDRESTART_MODE APT_LISTCHANGES_FRONTEND
+}
+
+# Valida nome de pacote: estrito, sem iniciar com "-".
+valid_pkg() {
+    case "$1" in
+        ''|-*) return 1 ;;
+    esac
+    printf '%s\n' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9.+_:-]*$'
+}
+
+cmd_osinfo() {
+    ( . /etc/os-release
+      printf 'O\tID\t%s\n' "${ID:-}"
+      printf 'O\tVERSION_ID\t%s\n' "${VERSION_ID:-}"
+      printf 'O\tVERSION_CODENAME\t%s\n' "${VERSION_CODENAME:-}"
+      printf 'O\tPRETTY_NAME\t%s\n' "${PRETTY_NAME:-}" )
+    printf 'K\tkernel\t%s\n' "$(uname -r)"
+}
+
+cmd_refresh() {
+    take_lock
+    case "$FAMILY" in
+        apt) apt_env; apt-get -q -o Dpkg::Use-Pty=0 update ;;
+        dnf) dnf -q makecache ;;
+        apk) apk update ;;
+    esac
+}
+
+# --- list ---------------------------------------------------------------
+
+# Extrai "Inst pkg [velha] (nova suite [arch])" -> nome<TAB>velha<TAB>nova<TAB>arch.
+apt_inst_lines() {
+    awk -v native="$1" '
+        $1 == "Inst" && $3 ~ /^\[/ {
+            old = substr($3, 2, length($3) - 2)
+            nw = $4; sub(/^\(/, "", nw)
+            arch = native
+            if (match($0, /\[[A-Za-z0-9_-]+\]\)/)) {
+                arch = substr($0, RSTART + 1, RLENGTH - 3)
+            }
+            printf "%s\t%s\t%s\t%s\n", $2, old, nw, arch
+        }'
+}
+
+list_apt() {
+    arch_native=$(dpkg --print-architecture)
+    inst=$(dpkg-query -W -f '${db:Status-Abbrev}\t${binary:Package}\t${source:Package}\t${Version}\t${source:Version}\t${Architecture}\n')
+    printf '%s\n' "$inst" | awk -F '\t' '
+        $1 ~ /^.i/ {
+            src = ($3 == "" ? $2 : $3); sv = ($5 == "" ? $4 : $5)
+            printf "I\t%s\t%s\t%s\t%s\t%s\n", $2, src, $4, sv, $6
+        }'
+    sim_up=$(apt-get -s -o Debug::NoLocking=1 upgrade)
+    sim_dist=$(apt-get -s -o Debug::NoLocking=1 dist-upgrade)
+    up=$(printf '%s\n' "$sim_up" | apt_inst_lines "$arch_native")
+    dist=$(printf '%s\n' "$sim_dist" | apt_inst_lines "$arch_native")
+    # held=1: so o dist-upgrade instalaria.
+    printf '%s\n@@\n%s\n' "$up" "$dist" | awk -F '\t' '
+        /^@@$/ { second = 1; next }
+        NF < 4 { next }
+        !second { seen[$1] = 1; printf "U\t%s\t%s\t%s\t%s\t0\n", $1, $2, $3, $4; next }
+        !($1 in seen) { printf "U\t%s\t%s\t%s\t%s\t1\n", $1, $2, $3, $4 }
+    ' | sort
+}
+
+# Normaliza rpm -qa em: nome<TAB>fonte<TAB>versao<TAB>arch (em ordem de instalacao).
+rpm_norm() {
+    raw=$(rpm -qa --qf '%{INSTALLTIME}\t%{NAME}\t%{SOURCERPM}\t%{EPOCH}:%{VERSION}-%{RELEASE}\t%{ARCH}\n')
+    printf '%s\n' "$raw" | sort -n | awk -F '\t' '
+        $2 == "gpg-pubkey" { next }
+        {
+            src = $3
+            if (src == "(none)" || src == "") { src = $2 }
+            else {
+                sub(/\.src\.rpm$/, "", src)
+                n = split(src, p, "-")
+                if (n >= 3) { src = p[1]; for (i = 2; i <= n - 2; i++) src = src "-" p[i] }
+            }
+            ver = $4
+            sub(/^\(none\):/, "", ver); sub(/^0:/, "", ver)
+            printf "%s\t%s\t%s\t%s\n", $2, src, ver, $5
+        }'
+}
+
+list_dnf() {
+    norm=$(rpm_norm)
+    printf '%s\n' "$norm" | sort | awk -F '\t' '{ printf "I\t%s\t%s\t%s\t%s\t%s\n", $1, $2, $3, $3, $4 }'
+    cand=$(dnf -q -C repoquery --upgrades --latest-limit 1 --qf '%{name}\t%{epoch}:%{version}-%{release}\t%{arch}\n')
+    printf '%s\n@@\n%s\n' "$norm" "$cand" | awk -F '\t' '
+        /^@@$/ { second = 1; next }
+        !second { if (NF >= 4) inst[$1 "." $4] = $3; next }
+        NF < 3 { next }
+        {
+            ver = $2; sub(/^\(none\):/, "", ver); sub(/^0:/, "", ver)
+            key = $1 "." $3
+            if (key in inst) printf "U\t%s\t%s\t%s\t%s\t0\n", $1, inst[key], ver, $3
+        }' | sort
+}
+
+apk_installed() {
+    awk '
+        function flush() { if (P != "") printf "%s\t%s\t%s\t%s\n", P, (O == "" ? P : O), V, A; P = V = O = A = "" }
+        /^$/ { flush(); next }
+        /^P:/ { P = substr($0, 3) }
+        /^V:/ { V = substr($0, 3) }
+        /^o:/ { O = substr($0, 3) }
+        /^A:/ { A = substr($0, 3) }
+        END { flush() }' /lib/apk/db/installed
+}
+
+list_apk() {
+    norm=$(apk_installed)
+    printf '%s\n' "$norm" | sort | awk -F '\t' '{ printf "I\t%s\t%s\t%s\t%s\t%s\n", $1, $2, $3, $3, $4 }'
+    ups=$(apk list -u)
+    printf '%s\n@@\n%s\n' "$norm" "$ups" | awk '
+        /^@@$/ { second = 1; next }
+        !second { split($0, t, "\t"); if (t[1] != "") byfull[t[1] "-" t[3]] = t[1]; next }
+        $0 !~ /\[upgradable from: / { next }
+        {
+            n = split($0, f, " ")
+            cand = f[1]; arch = f[2]
+            old = $0; sub(/.*\[upgradable from: /, "", old); sub(/\].*/, "", old)
+            if (old in byfull) name = byfull[old]
+            else { name = cand; sub(/-[0-9][^-]*(-r[0-9]+)?$/, "", name) }
+            ver = substr(cand, length(name) + 2)
+            oldver = substr(old, length(name) + 2)
+            printf "U\t%s\t%s\t%s\t%s\t0\n", name, oldver, ver, arch
+        }' | sort
+}
+
+cmd_list() {
+    case "$FAMILY" in
+        apt) list_apt ;;
+        dnf) list_dnf ;;
+        apk) list_apk ;;
+    esac
+}
+
+# --- reboot-required ----------------------------------------------------
+
+cmd_reboot_required() {
+    case "$FAMILY" in
+        apt)
+            if [ -e /var/run/reboot-required ]; then echo yes; else echo no; fi ;;
+        dnf)
+            if command -v needs-restarting >/dev/null 2>&1; then
+                rc=0
+                needs-restarting -r >/dev/null 2>&1 || rc=$?
+                if [ "$rc" -eq 0 ]; then echo no; else echo yes; fi
+            else
+                newest=$(rpm -q kernel-core kernel --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' 2>/dev/null | grep -v 'not installed' | sort -V | tail -n 1 || true)
+                if [ -n "$newest" ] && [ "$newest" != "$(uname -r)" ]; then echo yes; else echo no; fi
+            fi ;;
+        apk)
+            # Sem /lib/modules/<kernel em execucao>, o kernel foi trocado por upgrade.
+            if [ -n "$(ls /lib/modules 2>/dev/null)" ] && [ ! -d "/lib/modules/$(uname -r)" ]; then
+                echo yes
+            else
+                echo no
+            fi ;;
+    esac
+}
+
+# --- upgrades -----------------------------------------------------------
+
+cmd_upgrade_all() {
+    take_lock
+    case "$FAMILY" in
+        apt)
+            apt_env
+            apt-get -y -q -o Dpkg::Use-Pty=0 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade ;;
+        dnf) dnf -y upgrade ;;
+        apk) apk upgrade --no-progress ;;
+    esac
+}
+
+cmd_upgrade_pkgs() {
+    [ "$#" -gt 0 ] || die "upgrade-pkgs requer ao menos um pacote" 64
+    for p in "$@"; do
+        valid_pkg "$p" || die "nome de pacote invalido: $p" 64
+    done
+    take_lock
+    case "$FAMILY" in
+        apt)
+            apt_env
+            apt-get -y -q -o Dpkg::Use-Pty=0 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install --only-upgrade "$@" ;;
+        dnf) dnf -y upgrade "$@" ;;
+        apk) apk upgrade --no-progress "$@" ;;
+    esac
+}
+
+cmd_reboot() {
+    if [ -d /run/systemd/system ]; then
+        ( sleep 2; systemctl reboot ) >/dev/null 2>&1 </dev/null &
+    else
+        ( sleep 2; reboot ) >/dev/null 2>&1 </dev/null &
+    fi
+    echo "reboot agendado"
+}
+
+# --- main ---------------------------------------------------------------
+
+[ "$#" -ge 1 ] || die "uso: patcher-agent <subcomando>" 64
+sub=$1
+shift
+
+case "$sub" in
+    version) echo "PATCHER_AGENT $PROTOCOL"; exit 0 ;;
+    osinfo|refresh|list|reboot-required|upgrade-all|upgrade-pkgs|reboot) ;;
+    *) die "subcomando desconhecido: $sub" 64 ;;
+esac
+
+if [ "$#" -gt 0 ] && [ "$sub" != "upgrade-pkgs" ]; then
+    die "$sub nao aceita argumentos" 64
+fi
+
+detect_family
+
+case "$sub" in
+    osinfo) cmd_osinfo ;;
+    refresh) cmd_refresh ;;
+    list) cmd_list ;;
+    reboot-required) cmd_reboot_required ;;
+    upgrade-all) cmd_upgrade_all ;;
+    upgrade-pkgs) cmd_upgrade_pkgs "$@" ;;
+    reboot) cmd_reboot ;;
+esac

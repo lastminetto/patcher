@@ -1,0 +1,83 @@
+@page "/cves"
+@attribute [Authorize(Policy = "View")]
+@inherits LiveComponentBase
+@inject StateStore Store
+
+<PageTitle>CVEs — pve-patcher</PageTitle>
+<h1>CVEs corrigíveis na frota</h1>
+<p class="muted">Somente CVEs que uma atualização pendente já corrige, agrupadas por CVE.</p>
+
+<div class="row">
+    <select @bind="_minSev">
+        <option value="Unknown">Todas as severidades</option><option value="Medium">Média ou maior</option>
+        <option value="High">Alta ou maior</option><option value="Critical">Só críticas</option>
+    </select>
+    <label><input type="checkbox" @bind="_onlyKev" /> só KEV</label>
+    <input type="text" placeholder="buscar CVE ou pacote" @bind="_search" @bind:event="oninput" />
+</div>
+
+<div class="tablewrap"><table>
+    <thead><tr><th>CVE</th><th>Severidade</th><th>KEV</th><th class="num">CVSS</th><th class="num">EPSS</th><th>Pacotes</th><th class="num">VMs</th></tr></thead>
+    <tbody>
+    @foreach (var g in Rows())
+    {
+        <tr style="cursor:pointer" @onclick="() => Toggle(g.CveId)">
+            <td class="nowrap"><a class="mono" href="@CveLinks.For(g.Distro, g.CveId)" target="_blank" rel="noopener" @onclick:stopPropagation="true">@g.CveId</a></td>
+            <td><span class="badge @Fmt.SeverityClass(g.Severity)">@Fmt.SeverityName(g.Severity)</span></td>
+            <td>@if (g.Kev) { <span class="badge b-kev">KEV</span> }</td>
+            <td class="num">@Fmt.Cvss(g.Cvss)</td><td class="num">@Fmt.Percent(g.Epss)</td>
+            <td>@string.Join(", ", g.Packages)</td>
+            <td class="num">@g.Vms.Count</td>
+        </tr>
+        @if (_open == g.CveId)
+        {
+            <tr><td colspan="7" style="background:var(--panel2)">
+                @foreach (var v in g.Vms) { <a href="vm/@v.ClusterId/@v.VmId" style="margin-right:1rem">@v.Name</a> }
+            </td></tr>
+        }
+    }
+    </tbody>
+</table></div>
+
+@code {
+    private sealed record Row(string CveId, Severity Severity, bool Kev, double? Cvss, double? Epss, Distro Distro, List<string> Packages, List<VmEntity> Vms);
+
+    private List<Row> _all = [];
+    private string _minSev = "Unknown", _search = "", _open = "";
+    private bool _onlyKev;
+
+    protected override Task OnInitializedAsync() => OnLiveRefreshAsync();
+
+    protected override async Task OnLiveRefreshAsync()
+    {
+        var map = new Dictionary<string, Row>();
+        foreach (var vm in await Store.GetVmsAsync())
+        {
+            foreach (var f in vm.Findings.Where(f => f.Status == FindingStatus.FixedByPendingUpdate))
+            {
+                if (!map.TryGetValue(f.CveId, out var r))
+                    map[f.CveId] = r = new Row(f.CveId, f.Severity, f.Kev, f.Cvss, f.Epss, vm.Distro, [], []);
+                if (!r.Packages.Contains(f.Package)) r.Packages.Add(f.Package);
+                if (!r.Vms.Contains(vm)) r.Vms.Add(vm);
+                map[f.CveId] = r with
+                {
+                    Severity = (Severity)Math.Max((int)r.Severity, (int)f.Severity),
+                    Kev = r.Kev || f.Kev,
+                    Cvss = Math.Max(r.Cvss ?? 0, f.Cvss ?? 0) is var c && c > 0 ? c : null,
+                    Epss = Math.Max(r.Epss ?? 0, f.Epss ?? 0),
+                };
+            }
+        }
+        _all = map.Values.ToList();
+    }
+
+    private IEnumerable<Row> Rows()
+    {
+        var min = Enum.Parse<Severity>(_minSev);
+        return _all.Where(r => r.Severity >= min && (!_onlyKev || r.Kev) &&
+                (_search == "" || r.CveId.Contains(_search, StringComparison.OrdinalIgnoreCase) || r.Packages.Any(p => p.Contains(_search, StringComparison.OrdinalIgnoreCase))))
+            .OrderByDescending(r => r.Kev).ThenByDescending(r => r.Severity).ThenByDescending(r => r.Vms.Count).ThenByDescending(r => r.Cvss ?? 0);
+    }
+
+    private void Toggle(string id) => _open = _open == id ? "" : id;
+}

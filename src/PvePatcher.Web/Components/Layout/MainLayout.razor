@@ -1,9 +1,58 @@
 ﻿@inherits LayoutComponentBase
+@implements IDisposable
+@inject VaultMonitor Vault
+@inject AppEvents Events
+@inject JobQueue Queue
 
-@Body
+<div class="shell">
+    <AuthorizeView>
+        <Authorized>
+            <nav class="side">
+                <div class="brand">pve-patcher</div>
+                <NavLink class="nav" href="" Match="NavLinkMatch.All">Visão geral</NavLink>
+                <NavLink class="nav" href="cves">CVEs</NavLink>
+                <NavLink class="nav" href="jobs">Fila @(Active > 0 ? $"({Active})" : "")</NavLink>
+                <NavLink class="nav" href="settings">Configurações</NavLink>
+                <div class="who">
+                    @context.User.Identity?.Name<br />
+                    <span class="muted">cluster: @context.User.FindFirst(UserInfo.ClusterClaim)?.Value</span>
+                    <form method="post" action="/logout" style="margin-top:.5rem"><button class="small" type="submit">Sair</button></form>
+                </div>
+            </nav>
+        </Authorized>
+    </AuthorizeView>
+    <div class="main-wrap" style="flex:1;min-width:0">
+        @if (!Vault.IsReady)
+        {
+            <div class="banner">@Vault.Banner</div>
+        }
+        <main class="main">@Body</main>
+    </div>
+</div>
 
 <div id="blazor-error-ui" data-nosnippet>
-    An unhandled error has occurred.
-    <a href="." class="reload">Reload</a>
+    Ocorreu um erro inesperado.
+    <a href=".">Recarregar</a>
     <span class="dismiss">🗙</span>
 </div>
+
+@code {
+    private int Active => Queue.Snapshot().Count(j => j.Status is JobStatus.Pending or JobStatus.Running);
+    private bool _disposed;
+    private int _scheduled;
+
+    protected override void OnInitialized() => Events.DataChanged += OnChanged;
+
+    private void OnChanged()
+    {
+        if (Interlocked.Exchange(ref _scheduled, 1) == 1) return;
+        _ = Task.Delay(500).ContinueWith(async _ =>
+        {
+            _scheduled = 0;
+            if (_disposed) return;
+            try { await InvokeAsync(StateHasChanged); } catch { }
+        });
+    }
+
+    public void Dispose() { _disposed = true; Events.DataChanged -= OnChanged; }
+}

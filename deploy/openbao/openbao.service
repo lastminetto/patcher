@@ -1,0 +1,26 @@
+[Unit]
+Description=OpenBao (cofre de segredos do pve-patcher)
+Documentation=https://openbao.org/docs/
+After=network-online.target
+Wants=network-online.target
+ConditionFileNotEmpty=/etc/openbao/openbao.hcl
+
+[Service]
+Type=simple
+User=openbao
+Group=openbao
+ExecStart=/usr/bin/bao server -config=/etc/openbao/openbao.hcl
+ExecReload=/bin/kill --signal HUP $MAINPID
+KillMode=process
+KillSignal=SIGINT
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+# Sem core dump: a memória do processo contém material de chave.
+LimitCORE=0
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

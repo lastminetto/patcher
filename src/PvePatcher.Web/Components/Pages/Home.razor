@@ -1,7 +1,169 @@
-﻿@page "/"
+@page "/"
+@attribute [Authorize(Policy = "View")]
+@inherits LiveComponentBase
+@inject StateStore Store
+@inject CurrentUser Who
+@inject OperationsService Ops
+@inject VmIpService Ips
+@inject SchedulerService Scheduler
+@inject SettingsService Settings
 
-<PageTitle>Home</PageTitle>
+<PageTitle>Visão geral — pve-patcher</PageTitle>
+<h1>Visão geral</h1>
 
-<h1>Hello, world!</h1>
+@if (_msg is not null) { <div class="alert @(_msgErr ? "err" : "ok")">@_msg</div> }
 
-Welcome to your new app.
+<div class="cards">
+    <div class="card"><div class="n">@_vms.Count</div><div class="l">VMs (@_vms.Count(v => v.IsRunning) ligadas)</div></div>
+    <div class="card"><div class="n">@_vms.Count(v => v.PendingCount > 0)</div><div class="l">com atualização pendente</div></div>
+    <div class="card crit"><div class="n">@_vms.Sum(v => v.CriticalFixable)</div><div class="l">CVEs críticas corrigíveis</div></div>
+    <div class="card high"><div class="n">@_vms.Sum(v => v.HighFixable)</div><div class="l">CVEs altas corrigíveis</div></div>
+    <div class="card kev"><div class="n">@_vms.Sum(v => v.KevFixable)</div><div class="l">KEV corrigíveis</div></div>
+    <div class="card"><div class="n">@_vms.Count(v => v.RebootRequired)</div><div class="l">reboot pendente</div></div>
+    <div class="card"><div class="n" style="font-size:1.05rem">@Fmt.Relative(_lastCycle, Time.GetUtcNow())</div><div class="l">último ciclo agendado<br />próximo: @(_next is null ? "desligado" : Fmt.Date(_next))</div></div>
+</div>
+
+@foreach (var c in _clusters.Where(c => c.LastDiscoveryError is not null))
+{
+    <div class="alert err">Cluster <b>@c.Name</b>: @c.LastDiscoveryError</div>
+}
+
+<div class="row">
+    <select @bind="_fCluster"><option value="">Todos os clusters</option>@foreach (var c in _clusters) { <option value="@c.Id">@c.Name</option> }</select>
+    <select @bind="_fDistro"><option value="">Todas as distros</option>@foreach (var d in _vms.Select(v => v.Distro).Distinct().OrderBy(d => d.ToString())) { <option value="@d">@Fmt.DistroName(d)</option> }</select>
+    <label><input type="checkbox" @bind="_fCritical" /> só com CVE crítica</label>
+    <input type="text" placeholder="buscar por nome" @bind="_fSearch" @bind:event="oninput" />
+    <span class="grow"></span>
+    <button @onclick="DiscoverAsync" disabled="@_busy">Descobrir agora</button>
+    <button @onclick="ScanAllAsync" disabled="@(_user is null)">Escanear todas</button>
+    <button @onclick="ScanSelectedAsync" disabled="@(!CanActOnSelection)">Escanear (@_sel.Count)</button>
+    <button class="primary" @onclick="() => _dialog = true" disabled="@(!CanActOnSelection)">Atualizar… (@_sel.Count)</button>
+</div>
+
+<div class="tablewrap">
+<table>
+    <thead><tr>
+        <th></th><th>VM</th><th>Cluster / nó</th><th>Distro</th><th>IP</th><th class="num">Pend.</th>
+        <th>CVEs corrigíveis</th><th>Reboot</th><th>Último scan</th><th>Status</th>
+    </tr></thead>
+    <tbody>
+    @foreach (var v in Filtered())
+    {
+        var ip = _ips.GetValueOrDefault(v.Key);
+        var st = VmStatusRules.Describe(VmStatusRules.Compute(v, ip is not null));
+        var can = _user?.CanOperate(v.ClusterId, v.VmId) == true;
+        <tr class="@(_sel.Contains(v.Key) ? "sel" : "")">
+            <td><input type="checkbox" disabled="@(!can)" checked="@_sel.Contains(v.Key)" @onchange="e => Toggle(v.Key, (bool)e.Value!)" /></td>
+            <td><a href="vm/@v.ClusterId/@v.VmId">@v.Name</a> <span class="muted">#@v.VmId</span></td>
+            <td>@ClusterName(v.ClusterId) / @v.Node</td>
+            <td>@(v.Os?.PrettyName ?? Fmt.DistroName(v.Distro))</td>
+            <td class="mono">@(ip ?? "—")</td>
+            <td class="num">@(v.LastScanAt is null ? "—" : v.PendingCount.ToString())@if (v.HeldBackCount > 0) { <span class="muted" title="retidos (held back)"> (@v.HeldBackCount)</span> }</td>
+            <td><SevBadges Critical="v.CriticalFixable" High="v.HighFixable" Medium="v.MediumFixable" Low="v.LowFixable" Kev="v.KevFixable" /></td>
+            <td>@if (v.RebootRequired) { <span class="badge b-warn">pendente</span> }</td>
+            <td class="nowrap">@Fmt.Relative(v.LastScanAt, Time.GetUtcNow())</td>
+            <td><span class="badge @st.Css" title="@v.LastError">@st.Text</span></td>
+        </tr>
+    }
+    @if (_vms.Count == 0)
+    {
+        <tr><td colspan="10" class="muted">Nenhuma VM ainda. Use "Descobrir agora" (o cluster precisa ter token no cofre).</td></tr>
+    }
+    </tbody>
+</table>
+</div>
+@if (_user is not null && _vms.Any(v => v.ClusterId != _user.ClusterId))
+{
+    <p class="muted">Você está logado no cluster <b>@ClusterName(_user.ClusterId)</b>: VMs de outros clusters ficam somente leitura.</p>
+}
+
+@if (_dialog)
+{
+    <UpgradeDialog Vms="SelectedVms()" OnCancel="() => _dialog = false" OnConfirm="UpgradeAsync" />
+}
+
+@code {
+    private List<VmEntity> _vms = [];
+    private List<ClusterEntity> _clusters = [];
+    private Dictionary<VmKey, string?> _ips = [];
+    private UserInfo? _user;
+    private DateTimeOffset? _lastCycle, _next;
+    private readonly HashSet<VmKey> _sel = [];
+    private string _fCluster = "", _fDistro = "", _fSearch = "";
+    private bool _fCritical, _dialog, _busy, _msgErr;
+    private string? _msg;
+
+    private bool CanActOnSelection => _user is not null && _sel.Count > 0;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _user = await Who.GetAsync();
+        await OnLiveRefreshAsync();
+    }
+
+    protected override async Task OnLiveRefreshAsync()
+    {
+        _vms = (await Store.GetVmsAsync()).OrderBy(v => v.ClusterId).ThenBy(v => v.Name, StringComparer.OrdinalIgnoreCase).ToList();
+        _clusters = await Store.GetClustersAsync();
+        var s = Settings.Current;
+        _ips = _vms.ToDictionary(v => v.Key, v => Ips.Resolve(v, s)?.ToString());
+        _lastCycle = await Scheduler.GetLastCycleAsync();
+        _next = Scheduler.NextRun();
+        _sel.RemoveWhere(k => !_vms.Any(v => v.Key == k));
+    }
+
+    private string ClusterName(string id) => _clusters.FirstOrDefault(c => c.Id == id)?.Name ?? id;
+
+    private IEnumerable<VmEntity> Filtered() => _vms.Where(v =>
+        (_fCluster == "" || v.ClusterId == _fCluster) &&
+        (_fDistro == "" || v.Distro.ToString() == _fDistro) &&
+        (!_fCritical || v.CriticalFixable > 0) &&
+        (_fSearch == "" || v.Name.Contains(_fSearch, StringComparison.OrdinalIgnoreCase)));
+
+    private List<VmEntity> SelectedVms() => _vms.Where(v => _sel.Contains(v.Key)).ToList();
+
+    private void Toggle(VmKey k, bool on) { if (on) _sel.Add(k); else _sel.Remove(k); }
+
+    private void Say(string m, bool err = false) { _msg = m; _msgErr = err; }
+
+    private async Task DiscoverAsync()
+    {
+        _busy = true; Say("Descobrindo VMs...");
+        try
+        {
+            var r = await Ops.DiscoverNowAsync(_user!, default);
+            Say($"Discovery: {r.Added} nova(s), {r.Updated} atualizada(s), {r.Removed} removida(s)" +
+                (r.Errors.Count > 0 ? $"; erros em {string.Join(", ", r.Errors.Keys)}" : "."), r.Errors.Count > 0);
+        }
+        catch (Exception ex) { Say(ex.Message, true); }
+        _busy = false;
+        await OnLiveRefreshAsync();
+    }
+
+    private async Task ScanAllAsync()
+    {
+        var (q, s) = await Ops.EnqueueScanAllAsync(_user!);
+        Say($"{q} scan(s) enfileirado(s){(s > 0 ? $", {s} ignorado(s) (sem permissão, já na fila ou parada)" : "")}.");
+    }
+
+    private void ScanSelectedAsync()
+    {
+        try
+        {
+            var n = SelectedVms().Count(v => Ops.EnqueueScan(_user!, v.Key, v.Name) is not null);
+            Say($"{n} scan(s) enfileirado(s).");
+        }
+        catch (Exception ex) { Say(ex.Message, true); }
+    }
+
+    private void UpgradeAsync(UpgradeOptions o)
+    {
+        _dialog = false;
+        try
+        {
+            var n = SelectedVms().Count(v => Ops.EnqueueUpgrade(_user!, v.Key, v.Name, o) is not null);
+            Say($"{n} atualização(ões) enfileirada(s); executam uma por vez (veja a Fila).");
+        }
+        catch (Exception ex) { Say(ex.Message, true); }
+    }
+}
