@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/PvePatcher.Core/PvePatcher.Core.csproj" />
+    <Project Path="src/PvePatcher.Integrations/PvePatcher.Integrations.csproj" />
+    <Project Path="src/PvePatcher.Targets/PvePatcher.Targets.csproj" />
+    <Project Path="src/PvePatcher.Vuln/PvePatcher.Vuln.csproj" />
+    <Project Path="src/PvePatcher.Web/PvePatcher.Web.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/PvePatcher.Integrations.Tests/PvePatcher.Integrations.Tests.csproj" />
+    <Project Path="tests/PvePatcher.Targets.Tests/PvePatcher.Targets.Tests.csproj" />
+    <Project Path="tests/PvePatcher.Vuln.Tests/PvePatcher.Vuln.Tests.csproj" />
+    <Project Path="tests/PvePatcher.Web.Tests/PvePatcher.Web.Tests.csproj" />
+  </Folder>
+</Solution>
