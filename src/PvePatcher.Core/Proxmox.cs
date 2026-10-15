@@ -82,3 +82,10 @@ public interface IIpSelector
     /// </summary>
     IPAddress? Select(DiscoveredVm vm, IpOverride? ipOverride, IReadOnlyList<IPNetwork> preferredNetworks);
 }
+
+/// <summary>Permissões efetivas do token de serviço (não do usuário logado), para diagnosticar o cluster.</summary>
+public interface IProxmoxServicePermissions
+{
+    /// <summary>GET /access/permissions com o token de serviço: caminho ACL → privilégios efetivos. Vazio = ACL vazia.</summary>
+    Task<IReadOnlyDictionary<string, IReadOnlySet<string>>> GetServicePermissionsAsync(ClusterConfig cluster, CancellationToken ct);
+}

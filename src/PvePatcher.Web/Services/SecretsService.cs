@@ -68,13 +68,3 @@ public sealed class SecretsService(ISecretStore vault, SettingsService settings,
         catch (VaultUnavailableException) { return null; }
     }
 }
-
-/// <summary>Script de bootstrap das VMs (implementação real: PvePatcher.Targets.BootstrapScript, ligada na composição).</summary>
-public interface IBootstrapScriptProvider
-{
-    /// <summary>bootstrap-vm.sh com o patcher-agent embutido.</summary>
-    string Render();
-
-    /// <summary>Comando de uma linha para rodar como root na VM.</summary>
-    string Command(string url, string publicKey, string user, string? fromCidr);
-}

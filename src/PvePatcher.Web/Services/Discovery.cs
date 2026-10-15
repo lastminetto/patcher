@@ -7,7 +7,7 @@ public sealed record DiscoveryReport(int Added, int Updated, int Removed, Dictio
 
 /// <summary>Discovery de VMs de todos os clusters; falha num cluster não afeta os demais.</summary>
 public sealed class DiscoveryService(
-    IDbContextFactory<AppDb> factory, IProxmoxClient pve, AppEvents events, ILogger<DiscoveryService> log)
+    IDbContextFactory<AppDb> factory, IProxmoxClient pve, IProxmoxServicePermissions servicePerms, AppEvents events, ILogger<DiscoveryService> log)
 {
     private readonly SemaphoreSlim _gate = new(1, 1);
 
@@ -60,9 +60,19 @@ public sealed class DiscoveryService(
         return r;
     }
 
-    /// <summary>Dry-run para o botão "testar conexão".</summary>
-    public async Task<IReadOnlyList<DiscoveredVm>> TestAsync(ClusterConfig cluster, CancellationToken ct) =>
-        await pve.DiscoverVmsAsync(cluster, ct);
+    /// <summary>Dry-run para o botão "testar conexão", já com o diagnóstico de permissões do token de serviço.</summary>
+    public async Task<ClusterTestResult> TestAsync(ClusterConfig cluster, CancellationToken ct)
+    {
+        var vms = await pve.DiscoverVmsAsync(cluster, ct);
+        IReadOnlyDictionary<string, IReadOnlySet<string>>? perms = null;
+        var needPerms = vms.Count == 0 || (vms.Any(v => v.Status == "running") && !vms.Any(v => v.AgentResponding));
+        if (needPerms)
+        {
+            try { perms = await servicePerms.GetServicePermissionsAsync(cluster, ct); }
+            catch (Exception ex) when (ex is ProxmoxException) { /* diagnóstico é best-effort */ }
+        }
+        return ClusterTestDiagnosis.Evaluate(vms, perms);
+    }
 
     private async Task SetClusterResultAsync(string clusterId, string? error, CancellationToken ct)
     {

@@ -7,7 +7,7 @@ namespace PvePatcher.Web.Data;
 /// <summary>Configurações editáveis na UI (uma linha JSON). Segredos nunca entram aqui.</summary>
 public sealed class AppSettings
 {
-    public string SshUser { get; set; } = "patcher";
+    public string SshUser { get; set; } = "root";
     public List<string> PreferredNetworks { get; set; } = [];
     public string ScanCron { get; set; } = "0 3 * * *";
     public string TimeZone { get; set; } = "America/Sao_Paulo";

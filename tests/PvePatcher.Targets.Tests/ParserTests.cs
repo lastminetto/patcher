@@ -111,12 +111,18 @@ public class ShellQuoteTests
     public void Quote(string input, string expected) => Assert.Equal(expected, ShellQuote.Quote(input));
 
     [Fact]
-    public void Comando_do_agente()
+    public void Comando_do_agente_como_root_nao_usa_sudo()
     {
-        Assert.Equal("sudo -n /usr/local/sbin/patcher-agent 'list'", ShellQuote.BuildAgentCommand("list", []));
+        Assert.Equal("sh -s -- 'list'", ShellQuote.BuildAgentCommand("list", [], "root"));
+    }
+
+    [Fact]
+    public void Comando_do_agente_sem_root_usa_sudo_n_e_cita_argumentos()
+    {
+        Assert.Equal("sudo -n sh -s -- 'list'", ShellQuote.BuildAgentCommand("list", [], "ops"));
         Assert.Equal(
-            "sudo -n /usr/local/sbin/patcher-agent 'upgrade-pkgs' 'libc6:amd64' 'x'\\''y'",
-            ShellQuote.BuildAgentCommand("upgrade-pkgs", ["libc6:amd64", "x'y"]));
+            "sudo -n sh -s -- 'upgrade-pkgs' 'libc6:amd64' 'x'\\''y'",
+            ShellQuote.BuildAgentCommand("upgrade-pkgs", ["libc6:amd64", "x'y"], "ops"));
     }
 }
 
@@ -134,35 +140,44 @@ public class SessionAndScriptTests
 {
     [Theory]
     [InlineData(1, "sudo: a password is required", true)]
-    [InlineData(127, "sh: 1: /usr/local/sbin/patcher-agent: not found", true)]
-    [InlineData(1, "sudo: /usr/local/sbin/patcher-agent: command not found", true)]
+    [InlineData(1, "sudo: a terminal is required to read the password", true)]
+    [InlineData(1, "sudo: sorry, you must have a tty to run sudo (requiretty)", true)]
+    [InlineData(1, "ops is not in the sudoers file.", true)]
+    [InlineData(127, "sh: 1: sudo: not found", true)]
     [InlineData(1, "apt-get: E: Unable to lock", false)]
     [InlineData(100, "something not found", false)]
-    public void Detecta_agent_ausente(int exit, string stderr, bool expected) =>
-        Assert.Equal(expected, SshTargetSession.LooksLikeMissingAgent(exit, stderr));
+    [InlineData(0, "sudo: a password is required", false)]
+    public void Detecta_erros_de_sudo(int exit, string stderr, bool expected)
+    {
+        var msg = SshTargetSession.SudoError("ops", exit, stderr);
+        Assert.Equal(expected, msg is not null);
+        if (expected) Assert.Contains("'ops' precisa ser root ou ter sudo NOPASSWD", msg);
+    }
 
     [Fact]
-    public void Bootstrap_embute_o_agent()
+    public void Agent_embutido_termina_com_main_lendo_dev_null()
     {
-        var script = BootstrapScript.Render();
-        Assert.DoesNotContain(BootstrapScript.Placeholder, script);
-        Assert.Contains("cmd_upgrade_pkgs()", script);
+        var script = AgentScript.Text;
         Assert.StartsWith("#!/bin/sh", script);
         Assert.DoesNotContain("\r", script);
+        Assert.Contains("cmd_upgrade_pkgs()", script);
+        Assert.EndsWith("\nmain \"$@\" </dev/null\n", script);
     }
 
     [Fact]
-    public void Bootstrap_rejeita_agent_com_terminador()
+    public void Agent_embutido_nao_tem_codigo_solto_antes_do_main()
     {
-        Assert.Throws<ArgumentException>(() => BootstrapScript.Build("x\n@@PATCHER_AGENT@@\n", "a\nPATCHER_AGENT_EOF\nb"));
-    }
-
-    [Fact]
-    public void Comando_de_bootstrap_cita_valores()
-    {
-        var cmd = BootstrapScript.Command("https://p.example/bootstrap-vm.sh", "ssh-ed25519 AAAA patcher@x", fromCidr: "10.0.0.0/8");
-        Assert.Equal(
-            "curl -fsSL 'https://p.example/bootstrap-vm.sh' | sh -s -- --pubkey 'ssh-ed25519 AAAA patcher@x' --user 'patcher' --from '10.0.0.0/8'",
-            cmd);
+        // Só definições de função, variáveis e builtins de ambiente podem ficar no topo.
+        var top = new List<string>();
+        var depth = 0;
+        foreach (var line in AgentScript.Text.Split('\n'))
+        {
+            if (depth == 0 && line.Length > 0 && !char.IsWhiteSpace(line[0]) && !line.StartsWith('#') && !line.StartsWith('}'))
+                top.Add(line);
+            depth += line.Count(c => c == '{') - line.Count(c => c == '}');
+        }
+        var allowed = new[] { "set -eu", "PATH=", "export ", "umask ", "LC_ALL=", "PROTOCOL=", "LOCK=", "main \"$@\"" };
+        foreach (var l in top)
+            Assert.True(l.Contains("() {") || allowed.Any(l.StartsWith), $"código solto no topo do agent: {l}");
     }
 }

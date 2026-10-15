@@ -6,14 +6,15 @@ namespace PvePatcher.Targets;
 
 public sealed class SshTargetSession(SshClient client, string hostKeySha256) : ITargetSession
 {
-    private const string NotInstalledMessage = "patcher-agent não instalado ou sudoers ausente — rode o bootstrap na VM";
-
     public string HostKeySha256 { get; } = hostKeySha256;
 
     public async Task<CommandResult> RunAgentAsync(string subcommand, IReadOnlyList<string> args, Action<string>? onLine, TimeSpan timeout, CancellationToken ct)
     {
-        var text = ShellQuote.BuildAgentCommand(subcommand, args);
+        var user = client.ConnectionInfo.Username;
+        var text = ShellQuote.BuildAgentCommand(subcommand, args, user);
         using var cmd = client.CreateCommand(text, Encoding.UTF8);
+        // Precisa ser criado antes de iniciar o comando; o script vai pelo stdin e o fechamento do stream envia o EOF.
+        var input = cmd.CreateInputStream();
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(timeout);
 
@@ -25,7 +26,18 @@ public sealed class SshTargetSession(SshClient client, string hostKeySha256) : I
 
         try
         {
-            await cmd.ExecuteAsync(cts.Token).ConfigureAwait(false);
+            var exec = cmd.ExecuteAsync(cts.Token);
+            try
+            {
+                var bytes = new UTF8Encoding(false).GetBytes(AgentScript.Text);
+                await input.WriteAsync(bytes, cts.Token).ConfigureAwait(false);
+                await input.FlushAsync(cts.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                try { input.Dispose(); } catch { /* canal já fechado pelo remoto (ex.: sudo negado) */ }
+            }
+            await exec.ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -38,16 +50,24 @@ public sealed class SshTargetSession(SshClient client, string hostKeySha256) : I
         var exit = cmd.ExitStatus ?? -1;
         var so = stdout.ToString();
         var se = stderr.ToString();
-        if (LooksLikeMissingAgent(exit, se)) throw new TargetException(NotInstalledMessage);
+        if (SudoError(user, exit, se) is { } msg) throw new TargetException(msg);
         return new CommandResult(exit, so, se);
     }
 
-    public static bool LooksLikeMissingAgent(int exit, string stderr) =>
-        stderr.Contains("sudo: a password is required", StringComparison.Ordinal)
-        || stderr.Contains("sudo: a terminal is required", StringComparison.Ordinal)
-        || (exit == 1 && stderr.Contains("is not in the sudoers", StringComparison.Ordinal))
-        || (exit is 127 or 1 && stderr.Contains("command not found", StringComparison.OrdinalIgnoreCase))
-        || (exit == 127 && stderr.Contains("not found", StringComparison.OrdinalIgnoreCase));
+    /// <summary>Mensagem em pt-BR quando o sudo não deixou rodar sem senha/terminal; null se o erro é outro.</summary>
+    public static string? SudoError(string user, int exit, string stderr)
+    {
+        if (exit == 0) return null;
+        var sudo = stderr.Contains("sudo: a password is required", StringComparison.Ordinal)
+            || stderr.Contains("sudo: a terminal is required", StringComparison.Ordinal)
+            || stderr.Contains("requiretty", StringComparison.OrdinalIgnoreCase)
+            || stderr.Contains("is not in the sudoers", StringComparison.Ordinal)
+            || stderr.Contains("sudo: command not found", StringComparison.Ordinal)
+            || (exit == 127 && stderr.Contains("sudo: not found", StringComparison.Ordinal));
+        return sudo
+            ? $"A conta '{user}' precisa ser root ou ter sudo NOPASSWD (sem requiretty) na VM."
+            : null;
+    }
 
     private static async Task DrainAsync(params Task[] pumps)
     {

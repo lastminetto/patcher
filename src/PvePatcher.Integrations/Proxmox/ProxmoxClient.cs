@@ -18,7 +18,7 @@ public sealed class ProxmoxClientOptions
     public TimeSpan PingInitialDelay { get; set; } = TimeSpan.FromSeconds(1);
 }
 
-public sealed partial class ProxmoxClient(ISecretStore secrets, PveHttp http, ProxmoxClientOptions? options = null) : IProxmoxClient
+public sealed partial class ProxmoxClient(ISecretStore secrets, PveHttp http, ProxmoxClientOptions? options = null) : IProxmoxClient, IProxmoxServicePermissions
 {
     private readonly ProxmoxClientOptions _opt = options ?? new();
 
@@ -125,6 +125,18 @@ public sealed partial class ProxmoxClient(ISecretStore secrets, PveHttp http, Pr
             await Task.Delay(delay < remaining ? delay : remaining, ct);
             delay = TimeSpan.FromTicks(Math.Min(delay.Ticks * 2, TimeSpan.FromSeconds(10).Ticks));
         }
+    }
+
+    public async Task<IReadOnlyDictionary<string, IReadOnlySet<string>>> GetServicePermissionsAsync(ClusterConfig cluster, CancellationToken ct)
+    {
+        var data = await GetAsync(cluster, "/access/permissions", ct);
+        var result = new Dictionary<string, IReadOnlySet<string>>();
+        if (data.ValueKind != JsonValueKind.Object)
+            return result; // token sem privilégios: o PVE devolve {} (ou null)
+        foreach (var path in data.EnumerateObject())
+            if (path.Value.ValueKind == JsonValueKind.Object)
+                result[path.Name] = path.Value.EnumerateObject().Select(p => p.Name).ToHashSet(StringComparer.Ordinal);
+        return result;
     }
 
     // ---- internos ----

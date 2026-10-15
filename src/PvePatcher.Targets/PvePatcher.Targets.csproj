@@ -19,7 +19,6 @@
 
   <ItemGroup>
     <EmbeddedResource Include="../../deploy/target/patcher-agent" LogicalName="PvePatcher.Targets.deploy.patcher-agent" />
-    <EmbeddedResource Include="../../deploy/target/bootstrap-vm.sh" LogicalName="PvePatcher.Targets.deploy.bootstrap-vm.sh" />
   </ItemGroup>
 
 </Project>

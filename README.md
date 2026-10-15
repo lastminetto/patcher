@@ -18,7 +18,7 @@ Distros suportadas nas VMs: Debian, Ubuntu, AlmaLinux/Rocky e Alpine. Só VMs QE
 |---|---|
 | `PvePatcher.Core` | Contratos (interfaces e records) |
 | `PvePatcher.Integrations` | OpenBao, cliente da API do PVE, login via PVE, escolha de IP |
-| `PvePatcher.Targets` | SSH, scan e upgrade nas VMs (`patcher-agent`) |
+| `PvePatcher.Targets` | SSH sem agente, scan e upgrade nas VMs (`patcher-agent` embutido, enviado pelo stdin) |
 | `PvePatcher.Vuln` | Feeds OSV/KEV/EPSS/NVD e o cruzamento pacote x CVE |
 | `PvePatcher.Web` | Persistência, fila, agendador, autenticação e UI (este README) |
 
@@ -63,14 +63,16 @@ Distros suportadas nas VMs: Debian, Ubuntu, AlmaLinux/Rocky e Alpine. Só VMs QE
    para gravar), abra *Configurações > Clusters > Editar* e informe `token_id` e `token_secret`. Alternativa por linha
    de comando: `BAO_TOKEN=... deploy/lxc/set-cluster-token.sh prod 'pve-patcher@pve!svc'`.
 7. **Chave SSH**: em *Configurações > Chave SSH padrão*, gere um par ed25519 (a privada vai direto ao cofre) ou cole uma
-   existente. A tela mostra a chave pública e o comando de bootstrap.
-8. **Preparar as VMs** (como root em cada VM): `curl -fsSL http://<este-host>:8080/bootstrap-vm.sh | sh -s -- --pubkey '<chave pública>'`.
-   Cria o usuário `patcher`, instala o `patcher-agent` e um sudoers restrito a ele. O endpoint (gerado por `PvePatcher.Targets.BootstrapScript`, com o agent embutido) é anônimo (só serve o
-   script, sem segredos). Defina `Bootstrap:PublicBaseUrl` se a VM alcança o LXC por outro endereço que o da UI.
+   existente. A tela mostra a chave pública.
+8. **Preparar as VMs** (nada é instalado nelas): adicione a chave pública ao `~/.ssh/authorized_keys` da conta configurada em
+   *Configurações > Usuário SSH* (padrão `root`). A conta precisa ser **root** ou ter **sudo NOPASSWD** (sem `requiretty`).
+   A cada execução o app abre a conexão SSH e envia o `patcher-agent` pelo stdin: `sh -s -- <subcomando>` (root) ou
+   `sudo -n sh -s -- <subcomando>` (demais contas). Nada é gravado em disco na VM. Um usuário/chave diferente por VM pode
+   ser definido no cofre em `ssh/vm/{cluster}/{vmid}`.
 9. **Abrir a UI pelo nginx do OPNsense**: proxy para `http://<ip-do-LXC>:8080` (com WebSocket, necessário ao Blazor
-   Server). **Inclua a faixa do LXC e a dos clientes (as VMs, para o `curl` do bootstrap) na IP ACL do nginx**, senão a UI
-   ou o bootstrap respondem 403. O app respeita `X-Forwarded-For/Proto/Host`.
+Server). A UI e a faixa dos clientes (navegadores) precisam estar na IP ACL do nginx, senão respondem 403.   O app respeita `X-Forwarded-For/Proto/Host`.
 10. Clique em **Descobrir agora** e depois **Escanear todas**.
+### Firewall| Origem | Destino | Porta | Uso ||---|---|---|---|| LXC pve-patcher | nós do PVE | TCP 8006 | API do PVE (token de serviço e login dos usuários) || LXC pve-patcher | VMs | TCP 22 (ou a porta SSH da VM) | SSH sem agente || Navegadores / nginx | LXC pve-patcher | TCP 8080 | UI |As VMs não precisam alcançar o LXC.
 
 ### Bootstrap do primeiro cluster
 
@@ -80,7 +82,6 @@ Sem cluster cadastrado ninguém consegue logar. Por isso `Bootstrap:Clusters` (e
 ```json
 {
   "Bootstrap": {
-    "PublicBaseUrl": "http://172.22.20.50:8080",
     "Clusters": [
       { "Id": "prod", "Name": "Produção", "Endpoints": ["https://172.22.1.10:8006"], "CertFingerprintSha256": "AA:BB:..." }
     ]
@@ -88,7 +89,7 @@ Sem cluster cadastrado ninguém consegue logar. Por isso `Bootstrap:Clusters` (e
 }
 ```
 
-Depois disso os clusters se gerenciam na UI (CRUD, testar conexão = discovery dry-run). O token do cluster **não** vai
+Depois disso os clusters se gerenciam na UI (CRUD, testar conexão = discovery dry-run; com 0 VMs ou sem resposta do guest agent, o teste consulta as permissões do token e diz o que falta). O token do cluster **não** vai
 neste arquivo: é escrito no cofre (passo 6).
 
 ## Permissões do Proxmox por tela

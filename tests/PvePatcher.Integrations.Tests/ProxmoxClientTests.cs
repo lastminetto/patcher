@@ -52,6 +52,20 @@ public class ProxmoxClientTests
     };
 
     [Fact]
+    public async Task ServicePermissions_ParsesAndHandlesEmptyAcl()
+    {
+        var (client, handler) = Make(s => FakeHandler.Json("""{"data":{"/":{"VM.Audit":1,"Sys.Audit":1},"/vms/100":{"VM.PowerMgmt":1}}}"""));
+        var perms = await client.GetServicePermissionsAsync(Cluster, default);
+        Assert.Contains("VM.Audit", perms["/"]);
+        Assert.Contains("VM.PowerMgmt", perms["/vms/100"]);
+        Assert.StartsWith("PVEAPIToken=", handler.Requests[0].Headers["Authorization"]);
+        Assert.EndsWith("/access/permissions", handler.Requests[0].Uri.AbsolutePath);
+
+        var (empty, _) = Make(s => FakeHandler.Json("""{"data":{}}"""));
+        Assert.Empty(await empty.GetServicePermissionsAsync(Cluster, default));
+    }
+
+    [Fact]
     public async Task Discover_FiltersTemplatesAndMapsAgentData()
     {
         var (client, handler) = Make(DiscoveryRouter);

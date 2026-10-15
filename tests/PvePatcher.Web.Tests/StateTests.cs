@@ -153,11 +153,58 @@ public class Ed25519Tests
         }
         finally { File.Delete(file); }
     }
+}
+
+public class ClusterTestDiagnosisTests
+{
+    private static DiscoveredVm Vm(string status = "running", bool agent = true) =>
+        new("c", "n1", 100, "vm", status, [], null, agent);
+
+    private static IReadOnlyDictionary<string, IReadOnlySet<string>> Perms(params string[] privs) =>
+        privs.Length == 0
+            ? new Dictionary<string, IReadOnlySet<string>>()
+            : new Dictionary<string, IReadOnlySet<string>> { ["/"] = privs.ToHashSet() };
 
     [Fact]
-    public void BootstrapCommand_EmbedsPublicKey()
+    public void ZeroVms_EmptyAcl()
     {
-        var cmd = new PvePatcher.Web.Dev.FakeBootstrapScriptProvider().Command("http://h:8080/bootstrap-vm.sh", "ssh-ed25519 AAAA t", "patcher", null);
-        Assert.Equal("curl -fsSL http://h:8080/bootstrap-vm.sh | sh -s -- --pubkey 'ssh-ed25519 AAAA t'", cmd);
+        var r = ClusterTestDiagnosis.Evaluate([], Perms());
+        Assert.True(r.Warning);
+        Assert.Contains("Token sem permissões (ACL vazia)", r.Message);
+        Assert.Contains("usuário E ao token", r.Message);
+    }
+
+    [Fact]
+    public void ZeroVms_MissingVmAudit()
+    {
+        var r = ClusterTestDiagnosis.Evaluate([], Perms("Sys.Audit"));
+        Assert.True(r.Warning);
+        Assert.Contains("VM.Audit", r.Message);
+    }
+
+    [Fact]
+    public void Vms_NoAgentResponding_MissingGuestAgentPrivs()
+    {
+        var r = ClusterTestDiagnosis.Evaluate([Vm(agent: false)], Perms("VM.Audit"));
+        Assert.True(r.Warning);
+        Assert.Contains("VM.GuestAgent.Audit", r.Message);
+        Assert.Contains("VM.Monitor", r.Message);
+    }
+
+    [Fact]
+    public void Vms_NoAgentResponding_PrivsPresent_MentionsGuestAgent()
+    {
+        var r = ClusterTestDiagnosis.Evaluate([Vm(agent: false)], Perms("VM.Audit", "VM.GuestAgent.Audit"));
+        Assert.True(r.Warning);
+        Assert.Contains("qemu-guest-agent", r.Message);
+    }
+
+    [Fact]
+    public void AllStopped_NoWarning_AndHealthy_NoWarning()
+    {
+        Assert.False(ClusterTestDiagnosis.Evaluate([Vm("stopped", false)], null).Warning);
+        var ok = ClusterTestDiagnosis.Evaluate([Vm()], null);
+        Assert.False(ok.Warning);
+        Assert.Contains("1 VM(s)", ok.Message);
     }
 }

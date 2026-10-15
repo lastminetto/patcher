@@ -32,7 +32,7 @@ public sealed class FakeSecretStore : ISecretStore
     }
 }
 
-public sealed class FakeProxmoxClient : IProxmoxClient
+public sealed class FakeProxmoxClient : IProxmoxClient, IProxmoxServicePermissions
 {
     private readonly ConcurrentDictionary<int, List<VmSnapshot>> _snaps = new();
 
@@ -43,6 +43,12 @@ public sealed class FakeProxmoxClient : IProxmoxClient
             .Select(v => new DiscoveredVm(v.ClusterId, v.Node, v.VmId, v.Name, v.Status,
                 v.Agent ? FakeWorld.NicsOf(v) : [], v.Agent ? v.Os : null, v.Agent)).ToList();
     }
+
+    public Task<IReadOnlyDictionary<string, IReadOnlySet<string>>> GetServicePermissionsAsync(ClusterConfig cluster, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyDictionary<string, IReadOnlySet<string>>>(new Dictionary<string, IReadOnlySet<string>>
+        {
+            ["/"] = new HashSet<string> { "VM.Audit", "VM.GuestAgent.Audit", "VM.Monitor", "VM.Snapshot", "Sys.Audit" },
+        });
 
     public Task<string?> LocateVmAsync(ClusterConfig cluster, int vmId, CancellationToken ct) =>
         Task.FromResult(FakeWorld.Vms.FirstOrDefault(v => v.ClusterId == cluster.Id && v.VmId == vmId)?.Node);

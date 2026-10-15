@@ -9,10 +9,7 @@
 @inject CurrentUser Who
 @inject VaultMonitor Vault
 @inject IVulnFeedUpdater Feeds
-@inject NavigationManager Nav
-@inject IConfiguration Config
 @inject SchedulerService Scheduler
-@inject IBootstrapScriptProvider Bootstrap
 
 <PageTitle>Configurações — pve-patcher</PageTitle>
 <h1>Configurações</h1>
@@ -79,16 +76,15 @@
     @if (_pub is not null)
     {
         <p>Chave pública:</p><code class="cmd">@_pub</code>
-        <p style="margin-top:.8rem">Comando para preparar uma VM (rode como root na VM):</p>
-        <code class="cmd">@Bootstrap.Command(BaseUrl + "/bootstrap-vm.sh", _pub, _s.SshUser, null)</code>
+        <p style="margin-top:.8rem">Adicione esta chave ao <code>~/.ssh/authorized_keys</code> da conta configurada em cada VM. A conta precisa ser root ou ter sudo sem senha (NOPASSWD). Nada é instalado na VM: os comandos são enviados pela conexão SSH a cada execução.</p>
     }
     <div class="row" style="margin-top:.8rem">
         <button @onclick="GenerateKeyAsync" disabled="@_busy">Gerar novo par ed25519</button>
-        <span class="muted">Substitui a chave atual; VMs já preparadas precisarão da nova pública.</span>
+        <span class="muted">Substitui a chave atual; as VMs precisarão da nova pública no authorized_keys.</span>
     </div>
     <details><summary>Colar uma chave existente</summary>
         <label class="field"><span>Chave privada (OpenSSH/PEM)</span><textarea rows="5" @bind="_pastePriv"></textarea></label>
-        <label class="field"><span>Chave pública (para exibição/bootstrap)</span><input type="text" @bind="_pastePub" style="max-width:100%" /></label>
+        <label class="field"><span>Chave pública (para exibição)</span><input type="text" @bind="_pastePub" style="max-width:100%" /></label>
         <label class="field"><span>Passphrase (se houver)</span><input type="password" @bind="_pastePass" autocomplete="off" /></label>
         <button @onclick="PasteKeyAsync" disabled="@string.IsNullOrWhiteSpace(_pastePriv)">Gravar no cofre</button>
     </details>
@@ -96,7 +92,7 @@
 
 <h2>Agendamento e geral</h2>
 <div class="panel">
-    <label class="field"><span>Usuário SSH nas VMs</span><input type="text" @bind="_s.SshUser" /></label>
+    <label class="field"><span>Usuário SSH nas VMs (root, ou conta com sudo NOPASSWD)</span><input type="text" @bind="_s.SshUser" /></label>
     <label class="field"><span>Redes preferidas para escolher o IP (CIDR, uma por linha)</span><textarea rows="3" @bind="_nets"></textarea></label>
     <label class="field"><span>Scan agendado (cron de 5 campos)</span><input type="text" @bind="_s.ScanCron" /></label>
     <label class="field"><span>Fuso horário</span><input type="text" @bind="_s.TimeZone" /></label>
@@ -124,8 +120,6 @@
     private string _nets = "", _nvdKey = "", _pastePriv = "", _pastePub = "", _pastePass = "";
     private string _cId = "", _cName = "", _cEndpoints = "", _cFp = "", _tId = "", _tSecret = "";
     private UserInfo? _user;
-
-    private string BaseUrl => Config["Bootstrap:PublicBaseUrl"] is { Length: > 0 } b ? b : Nav.BaseUri.TrimEnd('/');
 
     protected override async Task OnInitializedAsync()
     {
@@ -229,8 +223,8 @@
     private Task TestAsync(ClusterEntity c) => Guard(async () =>
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
-        var vms = await Discovery.TestAsync(c.ToConfig(), cts.Token);
-        Say($"Conexão OK: {vms.Count} VM(s) QEMU em {vms.Select(v => v.Node).Distinct().Count()} nó(s) (dry-run, nada foi gravado).");
+        var r = await Discovery.TestAsync(c.ToConfig(), cts.Token);
+        Say(r.Message, r.Warning);
     });
 
     private Task GenerateKeyAsync() => Guard(async () =>

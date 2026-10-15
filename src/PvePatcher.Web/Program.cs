@@ -72,13 +72,14 @@ if (!builder.Configuration.GetValue<bool>("Dev:UseFakes"))
     builder.Services.AddPvePatcherIntegrations(builder.Configuration); // ISecretStore, IProxmoxClient, IProxmoxAuth, IIpSelector
     builder.Services.AddPvePatcherTargets(builder.Configuration);      // ITargetConnector, IHostScanner, IHostUpdater
     builder.Services.AddPvePatcherVuln(builder.Configuration);         // IVulnerabilityMatcher, IVulnFeedUpdater
-    builder.Services.AddSingleton<IBootstrapScriptProvider, TargetsBootstrapScriptProvider>();
 }
 else
 {
     builder.Services.AddSingleton<FakeWorld>();
     builder.Services.AddSingleton<ISecretStore, FakeSecretStore>();
-    builder.Services.AddSingleton<IProxmoxClient, FakeProxmoxClient>();
+    builder.Services.AddSingleton<FakeProxmoxClient>();
+    builder.Services.AddSingleton<IProxmoxClient>(sp => sp.GetRequiredService<FakeProxmoxClient>());
+    builder.Services.AddSingleton<IProxmoxServicePermissions>(sp => sp.GetRequiredService<FakeProxmoxClient>());
     builder.Services.AddSingleton<IProxmoxAuth, FakeProxmoxAuth>();
     builder.Services.AddSingleton<IIpSelector, FakeIpSelector>();
     builder.Services.AddSingleton<ITargetConnector, FakeTargetConnector>();
@@ -86,7 +87,6 @@ else
     builder.Services.AddSingleton<IHostUpdater, FakeHostUpdater>();
     builder.Services.AddSingleton<IVulnerabilityMatcher, FakeVulnMatcher>();
     builder.Services.AddSingleton<IVulnFeedUpdater, FakeFeedUpdater>();
-    builder.Services.AddSingleton<IBootstrapScriptProvider, FakeBootstrapScriptProvider>();
 }
 
 var app = builder.Build();
@@ -110,9 +110,6 @@ app.UseAntiforgery();
 
 app.MapStaticAssets();
 
-// Script de bootstrap das VMs (anônimo: só texto, sem segredos), já com o patcher-agent embutido.
-app.MapGet("/bootstrap-vm.sh", (IBootstrapScriptProvider scripts) =>
-    Results.Text(scripts.Render(), "text/x-shellscript; charset=utf-8")).AllowAnonymous();
 
 app.MapPost("/logout", async (HttpContext ctx) =>
 {

@@ -48,7 +48,6 @@ if [ ! -f /etc/pve-patcher/appsettings.Production.json ]; then
 {
   "Data": { "Path": "/var/lib/pve-patcher/state.db" },
   "Bootstrap": {
-    "PublicBaseUrl": "",
     "Clusters": [
       {
         "Id": "prod",
@@ -64,7 +63,7 @@ if [ ! -f /etc/pve-patcher/appsettings.Production.json ]; then
   }
 }
 EOF
-  echo "    criado /etc/pve-patcher/appsettings.Production.json (EDITE: endpoints do cluster e PublicBaseUrl)"
+  echo "    criado /etc/pve-patcher/appsettings.Production.json (EDITE: endpoints do cluster)"
 fi
 chown root:pve-patcher /etc/pve-patcher/appsettings.Production.json
 chmod 0640 /etc/pve-patcher/appsettings.Production.json
@@ -97,8 +96,9 @@ cat <<EOF
 
 Pronto. A UI responde em http://$(hostname -I | awk '{print $1}'):8080
 Próximos passos:
-  1. Edite /etc/pve-patcher/appsettings.Production.json (cluster e PublicBaseUrl) e rode: systemctl restart pve-patcher
+  1. Edite /etc/pve-patcher/appsettings.Production.json (endpoints do cluster) e rode: systemctl restart pve-patcher
   2. Em cada cluster PVE:  deploy/proxmox/pve-role.sh  (imprime o token)
   3. Grave o token: na UI (Configurações > Clusters, após o login) ou com deploy/lxc/set-cluster-token.sh
-  4. Após cada reboot do LXC o cofre volta selado: rode o unseal (pve-patcher-unseal).
+  4. Em cada VM: adicione a chave pública (Configurações > Chave SSH) ao authorized_keys de uma conta root ou com sudo NOPASSWD
+  5. Após cada reboot do LXC o cofre volta selado: rode o unseal (pve-patcher-unseal).
 EOF

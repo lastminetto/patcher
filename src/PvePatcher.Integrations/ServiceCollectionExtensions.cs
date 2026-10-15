@@ -19,7 +19,9 @@ public static class ServiceCollectionExtensions
 
         services.AddSingleton<PveHttp>(_ => new PveHttp());
         services.AddSingleton(new ProxmoxClientOptions());
-        services.AddSingleton<IProxmoxClient, ProxmoxClient>();
+        services.AddSingleton<ProxmoxClient>();
+        services.AddSingleton<IProxmoxClient>(sp => sp.GetRequiredService<ProxmoxClient>());
+        services.AddSingleton<IProxmoxServicePermissions>(sp => sp.GetRequiredService<ProxmoxClient>());
         services.AddSingleton<IProxmoxAuth, ProxmoxAuth>();
         services.AddSingleton<IIpSelector, IpSelector>();
         return services;

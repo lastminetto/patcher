@@ -16,7 +16,7 @@ Environment=ASPNETCORE_URLS=http://0.0.0.0:8080
 Environment=ASPNETCORE_ENVIRONMENT=Production
 Environment=DOTNET_NOLOGO=1
 Environment=DOTNET_CLI_TELEMETRY_OPTOUT=1
-# Config adicional (Bootstrap:Clusters, OpenBao:*, Bootstrap:PublicBaseUrl) em
+# Config adicional (Bootstrap:Clusters, OpenBao:*) em
 # /etc/pve-patcher/appsettings.Production.json, lida pelo próprio Program.cs.
 EnvironmentFile=-/etc/pve-patcher/pve-patcher.env
 

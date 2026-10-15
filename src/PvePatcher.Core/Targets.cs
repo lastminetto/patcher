@@ -11,14 +11,15 @@ public sealed record SshTarget(
 
 public sealed record CommandResult(int ExitCode, string StdOut, string StdErr);
 
-/// <summary>Sessão SSH aberta em uma VM. Só executa o wrapper /usr/local/sbin/patcher-agent via sudo.</summary>
+
+/// <summary>Sessão SSH aberta em uma VM. Executa o patcher-agent (enviado pelo stdin a cada execução; nada fica instalado na VM).</summary>
 public interface ITargetSession : IAsyncDisposable
 {
     /// <summary>Impressão da host key apresentada ("SHA256:...").</summary>
     string HostKeySha256 { get; }
 
     /// <summary>
-    /// Roda "sudo -n /usr/local/sbin/patcher-agent &lt;subcommand&gt; [args]". Cada linha de stdout/stderr
+    /// Roda "[sudo -n] sh -s -- &lt;subcommand&gt; [args]" com o script do agente no stdin (sudo só se o usuário não for root). Cada linha de stdout/stderr
     /// é entregue a <paramref name="onLine"/> conforme chega (log ao vivo).
     /// </summary>
     Task<CommandResult> RunAgentAsync(string subcommand, IReadOnlyList<string> args, Action<string>? onLine, TimeSpan timeout, CancellationToken ct);
@@ -37,7 +38,7 @@ public class HostKeyMismatchException(string expected, string actual)
     public string Actual { get; } = actual;
 }
 
-/// <summary>Erro de execução do patcher-agent (exit != 0, wrapper ausente, sudo negado...).</summary>
+/// <summary>Erro de execução do patcher-agent (exit != 0, sudo sem NOPASSWD ou com requiretty...).</summary>
 public class TargetException(string message, Exception? inner = null) : Exception(message, inner);
 
 /// <param name="SourceName">Pacote-fonte (dpkg ${source:Package}, SOURCERPM sem versão, apk origin).</param>

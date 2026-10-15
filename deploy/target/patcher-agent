@@ -1,7 +1,13 @@
 #!/bin/sh
-# patcher-agent: wrapper root-owned chamado pelo usuario "patcher" via sudo.
-# Subcomandos fixos e argumentos validados: o sudoers libera SOMENTE este script.
+# patcher-agent: script enviado pelo stdin da conexao SSH a cada execucao
+# ("sh -s -- <subcomando> [args]", com sudo -n quando o usuario nao e root).
+# Nada e gravado em disco na VM. Subcomandos fixos e argumentos validados.
 # POSIX sh (busybox ash incluido). Suporta apt, dnf e apk.
+#
+# IMPORTANTE: com "sh -s" o script e lido do stdin. Todo o codigo fica em funcoes
+# e a ULTIMA linha do arquivo e 'main "$@" </dev/null': assim o shell le o script
+# inteiro antes de executar qualquer coisa e os filhos (apt-get, dnf...) leem
+# /dev/null em vez de consumir o resto do script. Nada depois dessa linha.
 set -eu
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
@@ -242,28 +248,32 @@ cmd_reboot() {
 
 # --- main ---------------------------------------------------------------
 
-[ "$#" -ge 1 ] || die "uso: patcher-agent <subcomando>" 64
-sub=$1
-shift
+main() {
+    [ "$#" -ge 1 ] || die "uso: patcher-agent <subcomando>" 64
+    sub=$1
+    shift
 
-case "$sub" in
-    version) echo "PATCHER_AGENT $PROTOCOL"; exit 0 ;;
-    osinfo|refresh|list|reboot-required|upgrade-all|upgrade-pkgs|reboot) ;;
-    *) die "subcomando desconhecido: $sub" 64 ;;
-esac
+    case "$sub" in
+        version) echo "PATCHER_AGENT $PROTOCOL"; exit 0 ;;
+        osinfo|refresh|list|reboot-required|upgrade-all|upgrade-pkgs|reboot) ;;
+        *) die "subcomando desconhecido: $sub" 64 ;;
+    esac
 
-if [ "$#" -gt 0 ] && [ "$sub" != "upgrade-pkgs" ]; then
-    die "$sub nao aceita argumentos" 64
-fi
+    if [ "$#" -gt 0 ] && [ "$sub" != "upgrade-pkgs" ]; then
+        die "$sub nao aceita argumentos" 64
+    fi
 
-detect_family
+    detect_family
 
-case "$sub" in
-    osinfo) cmd_osinfo ;;
-    refresh) cmd_refresh ;;
-    list) cmd_list ;;
-    reboot-required) cmd_reboot_required ;;
-    upgrade-all) cmd_upgrade_all ;;
-    upgrade-pkgs) cmd_upgrade_pkgs "$@" ;;
-    reboot) cmd_reboot ;;
-esac
+    case "$sub" in
+        osinfo) cmd_osinfo ;;
+        refresh) cmd_refresh ;;
+        list) cmd_list ;;
+        reboot-required) cmd_reboot_required ;;
+        upgrade-all) cmd_upgrade_all ;;
+        upgrade-pkgs) cmd_upgrade_pkgs "$@" ;;
+        reboot) cmd_reboot ;;
+    esac
+}
+
+main "$@" </dev/null
