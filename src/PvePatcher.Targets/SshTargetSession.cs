@@ -13,8 +13,6 @@ public sealed class SshTargetSession(SshClient client, string hostKeySha256) : I
         var user = client.ConnectionInfo.Username;
         var text = ShellQuote.BuildAgentCommand(subcommand, args, user);
         using var cmd = client.CreateCommand(text, Encoding.UTF8);
-        // Precisa ser criado antes de iniciar o comando; o script vai pelo stdin e o fechamento do stream envia o EOF.
-        var input = cmd.CreateInputStream();
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(timeout);
 
@@ -26,7 +24,9 @@ public sealed class SshTargetSession(SshClient client, string hostKeySha256) : I
 
         try
         {
+            // O SSH.NET só entrega o stdin com o comando já em execução; o script vai por ele e o Dispose envia o EOF.
             var exec = cmd.ExecuteAsync(cts.Token);
+            var input = cmd.CreateInputStream();
             try
             {
                 var bytes = new UTF8Encoding(false).GetBytes(AgentScript.Text);
