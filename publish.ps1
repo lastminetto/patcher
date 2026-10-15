@@ -27,7 +27,7 @@ Get-ChildItem $deployDst -Recurse -File | Where-Object { $_.Extension -in '.sh',
 
 $tar = Join-Path $out 'pve-patcher.tar.gz'
 if (Test-Path $tar) { Remove-Item $tar -Force }
-tar -czf $tar -C $stage pve-patcher deploy
+& (Join-Path $env:SystemRoot 'System32\tar.exe') -czf $tar -C $stage pve-patcher deploy
 if ($LASTEXITCODE -ne 0) { throw 'tar falhou' }
 Remove-Item $stage -Recurse -Force
 

@@ -2,23 +2,21 @@
 
 ui = false
 
-# Armazenamento em arquivos. Backup consistente = parar o serviço e copiar /var/lib/openbao
-# (os dados continuam cifrados; sem as chaves de unseal não servem para nada).
-storage "file" {
-  path = "/var/lib/openbao"
+# OpenBao 2.x não tem mais o storage "file" (nem disable_mlock): o suportado é o raft integrado,
+# aqui com um nó só. Backup consistente: `bao operator raft snapshot save` (dados seguem cifrados;
+# sem as chaves de unseal não servem para nada).
+storage "raft" {
+  path    = "/var/lib/openbao"
+  node_id = "pve-patcher"
 }
 
 # Sem TLS de propósito: escuta só em loopback. Se um dia expuser na rede, ponha TLS aqui.
 listener "tcp" {
-  address         = "127.0.0.1:8200"
-  tls_disable     = true
+  address     = "127.0.0.1:8200"
+  tls_disable = true
 }
 
-api_addr = "http://127.0.0.1:8200"
-
-# mlock impede que a memória do processo (onde ficam as chaves) vá para swap. Num LXC sem
-# privilégios o mlock costuma falhar (sem CAP_IPC_LOCK / RLIMIT_MEMLOCK baixo) e o serviço nem
-# inicia, então desligamos. Mitigação: manter o LXC sem swap (swap = 0 no Proxmox).
-disable_mlock = true
+api_addr     = "http://127.0.0.1:8200"
+cluster_addr = "http://127.0.0.1:8201"
 
 log_level = "info"
