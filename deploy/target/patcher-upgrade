@@ -1,0 +1,45 @@
+#!/bin/sh
+# patcher-upgrade: upgrade seletivo do pve-patcher para o usuario restrito.
+# Instalado pelo bootstrap-vm.sh em /usr/local/sbin (root:root 0755). O sudoers o libera com
+# argumentos livres, por isso cada nome e validado aqui: nada de opcoes, caminhos, versoes,
+# curingas ou arquivos .deb/.rpm/.apk locais (que virariam root).
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+umask 022
+LC_ALL=C
+export LC_ALL
+cd /
+
+die() { echo "patcher-upgrade: $1" >&2; exit "${2:-1}"; }
+
+valid_pkg() {
+    case "$1" in
+        ''|[!A-Za-z0-9]*|*[!A-Za-z0-9.+_:-]*|*.deb|*.rpm|*.apk) return 1 ;;
+    esac
+}
+
+[ "$(id -u)" -eq 0 ] || die "execute via sudo" 77
+[ "$#" -gt 0 ] || die "informe ao menos um pacote" 64
+for p in "$@"; do
+    valid_pkg "$p" || die "nome de pacote invalido: $p" 64
+done
+
+ids=$( ( . /etc/os-release 2>/dev/null; echo "${ID:-} ${ID_LIKE:-}" ) || true )
+case " $ids " in
+    *" debian "*|*" ubuntu "*) FAMILY=apt ;;
+    *" rhel "*|*" fedora "*|*" centos "*|*" almalinux "*|*" rocky "*) FAMILY=dnf ;;
+    *" alpine "*) FAMILY=apk ;;
+    *) die "familia de distro nao suportada: $ids" ;;
+esac
+
+case "$FAMILY" in
+    apt)
+        DEBIAN_FRONTEND=noninteractive
+        NEEDRESTART_MODE=a
+        APT_LISTCHANGES_FRONTEND=none
+        export DEBIAN_FRONTEND NEEDRESTART_MODE APT_LISTCHANGES_FRONTEND
+        exec apt-get -y -q -o Dpkg::Use-Pty=0 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install --only-upgrade "$@" </dev/null ;;
+    dnf) exec dnf -y upgrade "$@" </dev/null ;;
+    apk) exec apk upgrade --no-progress "$@" </dev/null ;;
+esac

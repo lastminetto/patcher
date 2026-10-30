@@ -293,7 +293,7 @@ public sealed partial class VulnFeedUpdater : IVulnFeedUpdater
 
     // ---------------------------------------------------------------- NVD
 
-    public async Task EnrichAsync(IReadOnlyCollection<string> cveIds, CancellationToken ct)
+    public async Task EnrichAsync(IReadOnlyCollection<string> cveIds, Action<string>? log, CancellationToken ct)
     {
         var todo = SelectCvesToFetch(cveIds);
         if (todo.Count == 0) return;
@@ -313,32 +313,54 @@ public sealed partial class VulnFeedUpdater : IVulnFeedUpdater
             }
         }
 
-        var limiter = new SlidingWindowRateLimiter(
-            apiKey is null ? _options.NvdRequestsWithoutKey : _options.NvdRequestsWithKey, _options.NvdWindow);
+        var perWindow = apiKey is null ? _options.NvdRequestsWithoutKey : _options.NvdRequestsWithKey;
+        var limiter = new SlidingWindowRateLimiter(perWindow, _options.NvdWindow);
         var client = _http.CreateClient(HttpClientName);
         var failures = 0;
         string? lastError = null;
 
+        // Tempo máximo neste scan: a fila é serial e, sem API key, centenas de CVEs levariam horas.
+        var budget = _options.NvdBudgetPerScan;
+        using var budgetCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        if (budget > TimeSpan.Zero) budgetCts.CancelAfter(budget);
+        log?.Invoke($"NVD: {todo.Count} CVE(s) sem nota no cache, {(apiKey is null ? "sem API key" : "com API key")} " +
+                    $"({perWindow} consultas a cada {_options.NvdWindow.TotalSeconds:0} s)" +
+                    (budget > TimeSpan.Zero ? $"; até {budget.TotalMinutes:0.#} min neste scan." : "."));
+
+        var done = 0;
+        var lastReport = Stopwatch.GetTimestamp();
         foreach (var cve in todo)
         {
             ct.ThrowIfCancellationRequested();
+            if (budgetCts.IsCancellationRequested) break;
             try
             {
-                var result = await FetchNvdAsync(client, limiter, cve, apiKey, ct);
-                if (result is null)
-                {
-                    failures++;
-                    continue;
-                }
-                SaveNvd(cve, result.Value);
+                var result = await FetchNvdAsync(client, limiter, cve, apiKey, budgetCts.Token);
+                if (result is null) failures++;
+                else SaveNvd(cve, result.Value);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (OperationCanceledException) when (budgetCts.IsCancellationRequested && !ct.IsCancellationRequested)
             {
+                break;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                // Inclui o timeout do HttpClient (OperationCanceledException sem o ct cancelado).
                 failures++;
                 lastError = ex.Message;
                 _log.LogWarning("NVD {Cve}: {Message}", cve, ex.Message);
             }
+            done++;
+            if (Stopwatch.GetElapsedTime(lastReport) >= TimeSpan.FromSeconds(20))
+            {
+                log?.Invoke($"NVD: {done}/{todo.Count} consultados...");
+                lastReport = Stopwatch.GetTimestamp();
+            }
         }
+        if (done < todo.Count)
+            log?.Invoke($"NVD: limite de {budget.TotalMinutes:0.#} min atingido; {todo.Count - done} CVE(s) ficam para os próximos scans " +
+                        "(por ora valem a severidade da distro, KEV e EPSS)." +
+                        (apiKey is null ? " Cadastre a API key do NVD em Configurações para consultas 10x mais rápidas." : ""));
 
         using var conn = _db.Open();
         VulnDatabase.Exec(conn,

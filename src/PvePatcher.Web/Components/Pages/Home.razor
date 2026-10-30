@@ -44,7 +44,7 @@
 <table>
     <thead><tr>
         <th></th><th>VM</th><th>Cluster / nó</th><th>Distro</th><th>IP</th><th class="num">Pend.</th>
-        <th>CVEs corrigíveis</th><th>Reboot</th><th>Último scan</th><th>Status</th>
+        <th>CVEs corrigíveis</th><th>Reboot</th><th>Último scan</th><th>Status</th><th></th>
     </tr></thead>
     <tbody>
     @foreach (var v in Filtered())
@@ -63,11 +63,12 @@
             <td>@if (v.RebootRequired) { <span class="badge b-warn">pendente</span> }</td>
             <td class="nowrap">@Fmt.Relative(v.LastScanAt, Time.GetUtcNow())</td>
             <td><span class="badge @st.Css" title="@v.LastError">@st.Text</span></td>
+            <td class="right"><a class="btn small ssh-btn" href="terminal?vm=@Uri.EscapeDataString($"{v.ClusterId}/{v.VmId}")" target="_blank" title="Abrir terminal SSH em @v.Name (nova aba)" aria-label="Abrir terminal SSH em @v.Name">SSH ↗</a></td>
         </tr>
     }
     @if (_vms.Count == 0)
     {
-        <tr><td colspan="10" class="muted">Nenhuma VM ainda. Use "Descobrir agora" (o cluster precisa ter token no cofre).</td></tr>
+        <tr><td colspan="11" class="muted">Nenhuma VM ainda. Use "Descobrir agora" (o cluster precisa ter token no cofre).</td></tr>
     }
     </tbody>
 </table>

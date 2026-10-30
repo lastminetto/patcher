@@ -111,18 +111,13 @@ public class ShellQuoteTests
     public void Quote(string input, string expected) => Assert.Equal(expected, ShellQuote.Quote(input));
 
     [Fact]
-    public void Comando_do_agente_como_root_nao_usa_sudo()
+    public void Comando_do_agente_nunca_usa_sudo_no_shell_e_cita_argumentos()
     {
-        Assert.Equal("sh -s -- 'list'", ShellQuote.BuildAgentCommand("list", [], "root"));
-    }
-
-    [Fact]
-    public void Comando_do_agente_sem_root_usa_sudo_n_e_cita_argumentos()
-    {
-        Assert.Equal("sudo -n sh -s -- 'list'", ShellQuote.BuildAgentCommand("list", [], "ops"));
+        // O sudo fica dentro do agente, por comando privilegiado (sudoers restrito do bootstrap).
+        Assert.Equal("sh -s -- 'list'", ShellQuote.BuildAgentCommand("list", []));
         Assert.Equal(
-            "sudo -n sh -s -- 'upgrade-pkgs' 'libc6:amd64' 'x'\\''y'",
-            ShellQuote.BuildAgentCommand("upgrade-pkgs", ["libc6:amd64", "x'y"], "ops"));
+            "sh -s -- 'upgrade-pkgs' 'libc6:amd64' 'x'\\''y'",
+            ShellQuote.BuildAgentCommand("upgrade-pkgs", ["libc6:amd64", "x'y"]));
     }
 }
 
@@ -144,6 +139,7 @@ public class SessionAndScriptTests
     [InlineData(1, "sudo: sorry, you must have a tty to run sudo (requiretty)", true)]
     [InlineData(1, "ops is not in the sudoers file.", true)]
     [InlineData(127, "sh: 1: sudo: not found", true)]
+    [InlineData(1, "sudo: sorry, you are not allowed to set the following environment variables: DEBIAN_FRONTEND", true)]
     [InlineData(1, "apt-get: E: Unable to lock", false)]
     [InlineData(100, "something not found", false)]
     [InlineData(0, "sudo: a password is required", false)]
@@ -151,7 +147,7 @@ public class SessionAndScriptTests
     {
         var msg = SshTargetSession.SudoError("ops", exit, stderr);
         Assert.Equal(expected, msg is not null);
-        if (expected) Assert.Contains("'ops' precisa ser root ou ter sudo NOPASSWD", msg);
+        if (expected) Assert.Contains("'ops' precisa ser root, ter sido preparada pelo comando de bootstrap", msg);
     }
 
     [Fact]
@@ -176,8 +172,83 @@ public class SessionAndScriptTests
                 top.Add(line);
             depth += line.Count(c => c == '{') - line.Count(c => c == '}');
         }
-        var allowed = new[] { "set -eu", "PATH=", "export ", "umask ", "LC_ALL=", "PROTOCOL=", "LOCK=", "main \"$@\"" };
+        var allowed = new[] { "set -eu", "PATH=", "export ", "umask ", "LC_ALL=", "PROTOCOL=", "LOCK=", "WRAPPER=", "main \"$@\"" };
         foreach (var l in top)
             Assert.True(l.Contains("() {") || allowed.Any(l.StartsWith), $"código solto no topo do agent: {l}");
+    }
+}
+
+public class BootstrapScriptTests
+{
+    [Fact]
+    public void Bootstrap_embute_o_wrapper()
+    {
+        var script = BootstrapScript.Render();
+        Assert.StartsWith("#!/bin/sh", script);
+        Assert.DoesNotContain(BootstrapScript.Placeholder, script);
+        Assert.DoesNotContain("\r", script);
+        Assert.Contains("# patcher-upgrade: upgrade seletivo", script);
+        Assert.Contains("\nPATCHER_UPGRADE_EOF\n", script);
+    }
+
+    [Fact]
+    public void Bootstrap_rejeita_wrapper_com_terminador()
+    {
+        Assert.Throws<ArgumentException>(() => BootstrapScript.Build("x\n@@PATCHER_UPGRADE@@\n", "a\nPATCHER_UPGRADE_EOF\nb"));
+    }
+
+    [Fact]
+    public void Comando_de_bootstrap_cita_valores()
+    {
+        var cmd = BootstrapScript.Command("https://p.example/bootstrap-vm.sh", "ssh-ed25519 AAAA patcher@x\n", fromCidr: "10.0.0.0/8");
+        Assert.Equal(
+            "curl -fsSL 'https://p.example/bootstrap-vm.sh' | sh -s -- --pubkey 'ssh-ed25519 AAAA patcher@x' --user 'patcher' --from '10.0.0.0/8'",
+            cmd);
+    }
+
+    [Fact]
+    public void Comando_de_bootstrap_com_pin_aceita_autoassinado_mas_exige_a_chave()
+    {
+        var cmd = BootstrapScript.Command("https://10.0.0.1:8443/bootstrap-vm.sh", "ssh-ed25519 AAAA x", pinSha256: "abc+/=");
+        Assert.StartsWith("curl -fsSLk --pinnedpubkey 'sha256//abc+/=' 'https://10.0.0.1:8443/bootstrap-vm.sh' | sh -s --", cmd);
+    }
+
+    // Os comandos privilegiados do agente precisam bater, argumento por argumento, com as regras
+    // que o bootstrap grava no sudoers; qualquer diferença vira "sudo: a password is required" em produção.
+    [Theory]
+    [InlineData("priv_apt", "cmnd \"$APT\"", "-q -o Dpkg::Use-Pty=0 update")]
+    [InlineData("priv_apt", "cmnd \"$APT\"", "-y -q -o Dpkg::Use-Pty=0 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade")]
+    [InlineData("priv_bin dnf", "cmnd \"$DNF\"", "-q makecache")]
+    [InlineData("priv_bin dnf", "cmnd \"$DNF\"", "-y upgrade")]
+    [InlineData("priv_bin apk", "cmnd \"$APK\"", "update")]
+    [InlineData("priv_bin apk", "cmnd \"$APK\"", "upgrade --no-progress")]
+    public void Agente_e_sudoers_usam_os_mesmos_argumentos(string agentCall, string sudoersCall, string args)
+    {
+        Assert.Contains($"{agentCall} {args} ;;", AgentScript.Text);
+        Assert.Contains($"{sudoersCall} {args})", BootstrapScript.Render());
+    }
+
+    [Fact]
+    public void Bootstrap_do_terminal_e_embutido()
+    {
+        var script = BootstrapScript.RenderConsole();
+        Assert.StartsWith("#!/bin/sh", script);
+        Assert.DoesNotContain("\r", script);
+        Assert.Contains("SUDOERS=/etc/sudoers.d/zz-pve-patcher-console\n", script);
+        Assert.Contains("NOPASSWD: ALL", script);
+    }
+
+    // O script recusa o que a tela de Configurações aceita (ou vice-versa) se os regex divergirem.
+    [Fact]
+    public void Bootstrap_do_terminal_valida_o_usuario_como_a_tela()
+    {
+        Assert.Contains("grep -Eq '^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$'", BootstrapScript.RenderConsole());
+    }
+
+    [Fact]
+    public void Wrapper_e_agente_usam_o_mesmo_caminho()
+    {
+        Assert.Contains("\nWRAPPER=/usr/local/sbin/patcher-upgrade\n", AgentScript.Text);
+        Assert.Contains("\nWRAPPER=/usr/local/sbin/patcher-upgrade\n", BootstrapScript.Render());
     }
 }

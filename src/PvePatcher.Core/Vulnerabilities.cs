@@ -51,8 +51,11 @@ public interface IVulnFeedUpdater
     /// <summary>Baixa/atualiza OSV das releases em uso, KEV e EPSS. NVD é enriquecido sob demanda para os CVEs encontrados.</summary>
     Task UpdateAsync(IReadOnlyCollection<OsInfo> releasesInUse, CancellationToken ct);
 
-    /// <summary>Busca CVSS no NVD para CVEs ainda sem nota (respeitando rate limit).</summary>
-    Task EnrichAsync(IReadOnlyCollection<string> cveIds, CancellationToken ct);
+    /// <summary>
+    /// Busca CVSS no NVD para CVEs ainda sem nota (respeitando rate limit), na ordem recebida e dentro do tempo
+    /// máximo por scan; o que não couber fica para a próxima chamada. <paramref name="log"/> recebe o progresso.
+    /// </summary>
+    Task EnrichAsync(IReadOnlyCollection<string> cveIds, Action<string>? log, CancellationToken ct);
 
     Task<IReadOnlyList<FeedState>> GetStatusAsync(CancellationToken ct);
 }

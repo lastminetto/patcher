@@ -15,6 +15,11 @@ public sealed class FakeSecretStore : ISecretStore
         {
             [SecretPaths.PrivateKey] = kp.PrivateKey, [SecretPaths.PublicKey] = kp.PublicKey,
         };
+        var console = Ed25519OpenSsh.Generate("pve-patcher-console-dev");
+        _data[SecretPaths.SshConsole] = new Dictionary<string, string>
+        {
+            [SecretPaths.PrivateKey] = console.PrivateKey, [SecretPaths.PublicKey] = console.PublicKey,
+        };
     }
 
     public Task<VaultStatus> GetStatusAsync(CancellationToken ct) => Task.FromResult(new VaultStatus(VaultState.Ready, "fake"));
@@ -263,7 +268,7 @@ public sealed class FakeFeedUpdater : IVulnFeedUpdater
         _at = DateTimeOffset.UtcNow;
     }
 
-    public Task EnrichAsync(IReadOnlyCollection<string> cveIds, CancellationToken ct) => Task.CompletedTask;
+    public Task EnrichAsync(IReadOnlyCollection<string> cveIds, Action<string>? log, CancellationToken ct) => Task.CompletedTask;
 
     public Task<IReadOnlyList<FeedState>> GetStatusAsync(CancellationToken ct) =>
         Task.FromResult<IReadOnlyList<FeedState>>([

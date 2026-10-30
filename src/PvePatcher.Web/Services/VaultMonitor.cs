@@ -9,13 +9,10 @@ public sealed class VaultMonitor(ISecretStore vault, AppEvents events, ILogger<V
 
     public bool IsReady => Current.State == VaultState.Ready;
 
-    public string Banner => Current.State switch
-    {
-        VaultState.Ready => "",
-        VaultState.Sealed => VaultMessages.Sealed,
-        VaultState.AuthFailed => "Cofre: falha de autenticação do serviço (AppRole) — verifique init-openbao",
-        _ => "Cofre inacessível — verifique o serviço openbao no LXC",
-    };
+    /// <summary>O cofre passou a responder (ex.: depois do unseal). Quem falhou por cofre selado pode tentar de novo.</summary>
+    public event Action? BecameReady;
+
+    public string Banner => Current.State == VaultState.Ready ? "" : VaultMessages.For(Current);
 
     public async Task<VaultStatus> RefreshAsync(CancellationToken ct = default)
     {
@@ -29,6 +26,11 @@ public sealed class VaultMonitor(ISecretStore vault, AppEvents events, ILogger<V
             log.LogInformation("Cofre: {Old} -> {New} {Detail}", Current.State, status.State, status.Detail);
             Current = status;
             events.RaiseData();
+            if (status.State == VaultState.Ready)
+            {
+                try { BecameReady?.Invoke(); }
+                catch (Exception ex) { log.LogWarning(ex, "Falha num assinante de BecameReady"); }
+            }
         }
         else Current = status;
         return status;

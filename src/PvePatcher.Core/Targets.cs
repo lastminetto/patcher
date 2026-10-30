@@ -1,13 +1,15 @@
 namespace PvePatcher.Core;
 
 /// <param name="KnownHostKeySha256">Impressão gravada (formato "SHA256:base64" do OpenSSH). Null = TOFU.</param>
+/// <param name="Certificate">Certificado OpenSSH da chave (conteúdo do "-cert.pub"), opcional.</param>
 public sealed record SshTarget(
     string Host,
     int Port,
     string User,
     string PrivateKey,
     string? Passphrase,
-    string? KnownHostKeySha256);
+    string? KnownHostKeySha256,
+    string? Certificate = null);
 
 public sealed record CommandResult(int ExitCode, string StdOut, string StdErr);
 
@@ -19,7 +21,7 @@ public interface ITargetSession : IAsyncDisposable
     string HostKeySha256 { get; }
 
     /// <summary>
-    /// Roda "[sudo -n] sh -s -- &lt;subcommand&gt; [args]" com o script do agente no stdin (sudo só se o usuário não for root). Cada linha de stdout/stderr
+    /// Roda "sh -s -- &lt;subcommand&gt; [args]" com o script do agente no stdin (sem root, o agente usa sudo -n só nos passos privilegiados). Cada linha de stdout/stderr
     /// é entregue a <paramref name="onLine"/> conforme chega (log ao vivo).
     /// </summary>
     Task<CommandResult> RunAgentAsync(string subcommand, IReadOnlyList<string> args, Action<string>? onLine, TimeSpan timeout, CancellationToken ct);

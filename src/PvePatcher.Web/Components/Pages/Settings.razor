@@ -10,6 +10,10 @@
 @inject VaultMonitor Vault
 @inject IVulnFeedUpdater Feeds
 @inject SchedulerService Scheduler
+@inject NavigationManager Nav
+@inject IConfiguration Config
+@inject IBootstrapScriptProvider Bootstrap
+@inject AppCertificatePin CertPin
 
 <PageTitle>Configurações — pve-patcher</PageTitle>
 <h1>Configurações</h1>
@@ -76,11 +80,32 @@
     @if (_pub is not null)
     {
         <p>Chave pública:</p><code class="cmd">@_pub</code>
-        <p style="margin-top:.8rem">Adicione esta chave ao <code>~/.ssh/authorized_keys</code> da conta configurada em cada VM. A conta precisa ser root ou ter sudo sem senha (NOPASSWD). Nada é instalado na VM: os comandos são enviados pela conexão SSH a cada execução.</p>
+        <h3>Comando de bootstrap</h3>
+        <div class="row">
+            <label class="grow">URL do app vista pelas VMs
+                <input type="text" @bind="_bootUrl" placeholder="@($"padrão: {ConfigOrPageUrl}")" autocomplete="off" style="width:100%" /></label>
+            <label>Certificado no curl
+                <select @bind="_bootTls">
+                    <option value="">Automático (appsettings: @(Config.GetValue("Bootstrap:PinAppCertificate", true) ? "pin" : "cadeia"))</option>
+                    <option value="@BootstrapLink.TlsPin">Pinar a chave do app (acesso direto, autoassinado)</option>
+                    <option value="@BootstrapLink.TlsChain">Validar a cadeia (proxy com certificado confiável)</option>
+                </select></label>
+            <button @onclick="SaveBootstrapAsync" disabled="@(!BootstrapDirty)">Salvar</button>
+        </div>
+        @if (BootstrapLink.UsePin(BaseUrl, SettingsSvc.Current.BootstrapTls, Config.GetValue("Bootstrap:PinAppCertificate", true)) && BootstrapPin is null)
+        {
+            <div class="alert">Pin pedido, mas o certificado do app não foi encontrado: o comando sai sem pin.</div>
+        }
+        <p style="margin-top:.8rem">Comando para preparar uma VM (rode como root na VM):</p>
+        <code class="cmd">@Bootstrap.Command(BaseUrl + "/bootstrap-vm.sh", _pub, BootstrapUser, null, BootstrapPin)</code>
+        <p class="muted" style="margin-top:.4rem">Cria o usuário <code>@BootstrapUser</code>, autoriza esta chave e grava um sudoers que libera só o update e o upgrade
+            do gerenciador de pacotes, o reboot e o <code>/usr/local/sbin/patcher-upgrade</code> (upgrade seletivo, valida os nomes).
+            O agente continua indo pela conexão SSH a cada execução. Rode de novo após atualizar o app ou trocar a chave.
+            @if (SettingsSvc.Current.SshUser == "root") { <strong>O usuário SSH salvo ainda é root: troque para @BootstrapUser em "Agendamento e geral" depois do bootstrap.</strong> }</p>
     }
     <div class="row" style="margin-top:.8rem">
         <button @onclick="GenerateKeyAsync" disabled="@_busy">Gerar novo par ed25519</button>
-        <span class="muted">Substitui a chave atual; as VMs precisarão da nova pública no authorized_keys.</span>
+        <span class="muted">Substitui a chave atual; as VMs precisarão da nova pública (rode o bootstrap de novo).</span>
     </div>
     <details><summary>Colar uma chave existente</summary>
         <label class="field"><span>Chave privada (OpenSSH/PEM)</span><textarea rows="5" @bind="_pastePriv"></textarea></label>
@@ -90,9 +115,45 @@
     </details>
 </div>
 
+<h2>Terminal SSH</h2>
+<div class="panel">
+    <p class="muted">Chave e usuário usados só pelo <a href="terminal" target="_blank">terminal</a> da interface, iguais para todas as VMs.
+        Qualquer usuário logado no app pode abrir o terminal; cada sessão fica registrada no log do serviço.
+        Prepare a conta nas VMs com o comando abaixo (ou use um certificado da sua CA SSH).</p>
+    <div class="row">
+        <label>Usuário <input type="text" @bind="_consoleUser" autocomplete="off" style="width:12rem" /></label>
+        <button @onclick="SaveConsoleUserAsync" disabled="@(_consoleUser.Trim() == SettingsSvc.Current.ConsoleUser)">Salvar usuário</button>
+    </div>
+    <p>Chave privada: @SecretStatus(_consoleExists, SecretsService.MarkConsole) <span class="muted">(o valor nunca é exibido)</span>
+        @if (_consoleHasCert) { <span class="badge b-ok">com certificado</span> }</p>
+    @if (_consolePub is not null)
+    {
+        <p>Chave pública:</p><code class="cmd">@_consolePub</code>
+        <h3>Preparo da conta</h3>
+        <p>Comando para conferir e ajustar a conta <code>@SettingsSvc.Current.ConsoleUser</code> numa VM (rode como root na VM):</p>
+        <code class="cmd">@Bootstrap.Command(BaseUrl + "/bootstrap-console.sh", _consolePub, SettingsSvc.Current.ConsoleUser, null, BootstrapPin)</code>
+        <p class="muted" style="margin-top:.4rem">O usuário precisa existir na VM (o script não cria contas). Ele confere e corrige só o que faltar:
+            a chave no <code>authorized_keys</code> (sem <code>no-pty</code>), as permissões do home e do <code>~/.ssh</code>, a conta
+            bloqueada sem senha e o sudo, gravando <code>NOPASSWD: ALL</code> se o sudo pedir senha (o terminal vira admin sem senha
+            nessa conta). Da configuração do sshd ele só avisa. Usa a URL e o certificado do comando de bootstrap acima.
+            Rode de novo após trocar a chave ou o usuário.</p>
+    }
+    <div class="row" style="margin-top:.8rem">
+        <button @onclick="GenerateConsoleKeyAsync" disabled="@_busy">Gerar novo par ed25519</button>
+        <span class="muted">Substitui a chave atual do terminal.</span>
+    </div>
+    <details><summary>Colar uma chave existente (com certificado opcional)</summary>
+        <label class="field"><span>Chave privada (OpenSSH/PEM)</span><textarea rows="5" @bind="_conPriv"></textarea></label>
+        <label class="field"><span>Chave pública (para exibição)</span><input type="text" @bind="_conPub" style="max-width:100%" /></label>
+        <label class="field"><span>Certificado OpenSSH (conteúdo do <code>-cert.pub</code>, opcional)</span><textarea rows="3" @bind="_conCert"></textarea></label>
+        <label class="field"><span>Passphrase (se houver)</span><input type="password" @bind="_conPass" autocomplete="off" /></label>
+        <button @onclick="PasteConsoleKeyAsync" disabled="@string.IsNullOrWhiteSpace(_conPriv)">Validar e gravar no cofre</button>
+    </details>
+</div>
+
 <h2>Agendamento e geral</h2>
 <div class="panel">
-    <label class="field"><span>Usuário SSH nas VMs (root, ou conta com sudo NOPASSWD)</span><input type="text" @bind="_s.SshUser" /></label>
+    <label class="field"><span>Usuário SSH nas VMs (o criado pelo bootstrap; root ou conta com sudo NOPASSWD também funcionam)</span><input type="text" @bind="_s.SshUser" /></label>
     <label class="field"><span>Redes preferidas para escolher o IP (CIDR, uma por linha)</span><textarea rows="3" @bind="_nets"></textarea></label>
     <label class="field"><span>Scan agendado (cron de 5 campos)</span><input type="text" @bind="_s.ScanCron" /></label>
     <label class="field"><span>Fuso horário</span><input type="text" @bind="_s.TimeZone" /></label>
@@ -114,12 +175,43 @@
     private List<ClusterEntity> _clusters = [];
     private List<FeedState> _feeds = [];
     private Dictionary<string, bool?> _tokenExists = [];
-    private bool? _nvdExists, _sshExists;
+    private bool? _nvdExists, _sshExists, _consoleExists;
+    private bool _consoleHasCert;
+    private string? _consolePub;
+    private string _consoleUser = "", _conPriv = "", _conPub = "", _conPass = "", _conCert = "";
     private string? _pub, _msg;
     private bool _msgErr, _editing, _busy;
     private string _nets = "", _nvdKey = "", _pastePriv = "", _pastePub = "", _pastePass = "";
     private string _cId = "", _cName = "", _cEndpoints = "", _cFp = "", _tId = "", _tSecret = "";
     private UserInfo? _user;
+
+    // URL e TLS do bootstrap: tela > appsettings (Bootstrap:PublicBaseUrl / PinAppCertificate) > endereço da página.
+    private string ConfigOrPageUrl => BootstrapLink.BaseUrl(null, Config["Bootstrap:PublicBaseUrl"], Nav.BaseUri);
+    private string BaseUrl => BootstrapLink.BaseUrl(SettingsSvc.Current.BootstrapBaseUrl, Config["Bootstrap:PublicBaseUrl"], Nav.BaseUri);
+
+    // Pin da chave do certificado do próprio app (autoassinado). Atrás de um proxy, o certificado é outro: use "cadeia".
+    private string? BootstrapPin =>
+        BootstrapLink.UsePin(BaseUrl, SettingsSvc.Current.BootstrapTls, Config.GetValue("Bootstrap:PinAppCertificate", true))
+            ? CertPin.Current() : null;
+
+    private string _bootUrl = "", _bootTls = "";
+    private bool BootstrapDirty =>
+        _bootUrl.Trim() != SettingsSvc.Current.BootstrapBaseUrl || _bootTls != SettingsSvc.Current.BootstrapTls;
+
+    private Task SaveBootstrapAsync() => Guard(async () =>
+    {
+        if (!BootstrapLink.TryNormalize(_bootUrl, out var url, out var error)) throw new ArgumentException(error);
+        if (_bootTls is not ("" or BootstrapLink.TlsPin or BootstrapLink.TlsChain)) throw new ArgumentException("Modo de certificado inválido.");
+        var live = SettingsSvc.Current;
+        live.BootstrapBaseUrl = url;
+        live.BootstrapTls = _bootTls;
+        await SettingsSvc.SaveAsync(live);
+        (_s.BootstrapBaseUrl, _s.BootstrapTls, _bootUrl) = (url, _bootTls, url);
+        Say("Endereço do bootstrap salvo.");
+    });
+
+    // O bootstrap recusa root (o objetivo é uma conta sem root).
+    private string BootstrapUser => SettingsSvc.Current.SshUser is { Length: > 0 } u && u != "root" ? u : "patcher";
 
     protected override async Task OnInitializedAsync()
     {
@@ -128,6 +220,8 @@
         // cópia para edição
         _s = Data.Json.Deserialize<AppSettings>(Data.Json.Serialize(s)) ?? new AppSettings();
         _nets = string.Join('\n', _s.PreferredNetworks);
+        _consoleUser = _s.ConsoleUser;
+        (_bootUrl, _bootTls) = (_s.BootstrapBaseUrl, _s.BootstrapTls);
         await ReloadAsync();
     }
 
@@ -141,6 +235,10 @@
         _nvdExists = await Secrets.ExistsAsync(SecretPaths.Nvd, default);
         _sshExists = await Secrets.ExistsAsync(SecretPaths.SshDefault, default);
         _pub = await Secrets.GetSshPublicKeyAsync(default);
+        var ck = await Secrets.GetConsoleKeyInfoAsync(default);
+        _consoleExists = await Secrets.ExistsAsync(SecretPaths.SshConsole, default);
+        _consolePub = ck?.PublicKey;
+        _consoleHasCert = ck?.HasCertificate == true;
         try { _feeds = (await Feeds.GetStatusAsync(default)).ToList(); } catch { _feeds = []; }
     }
 
@@ -160,7 +258,7 @@
             OperationsService.Require(_user?.CanAdmin == true, "é preciso Sys.Modify");
             await action();
         }
-        catch (VaultUnavailableException) { Say(VaultMessages.Sealed, true); }
+        catch (VaultUnavailableException ex) { Say(VaultMessages.For(ex), true); }
         catch (Exception ex) { Say(ex.Message, true); }
         await ReloadAsync();
     }
@@ -240,6 +338,33 @@
         await Secrets.SetSshKeyAsync(_pastePriv, _pastePub, _pastePass, default);
         _pastePriv = _pastePub = _pastePass = "";
         Say("Chave gravada no cofre.");
+    });
+
+    private Task SaveConsoleUserAsync() => Guard(async () =>
+    {
+        var u = _consoleUser.Trim();
+        if (!System.Text.RegularExpressions.Regex.IsMatch(u, "^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$"))
+            throw new ArgumentException("Usuário do terminal inválido.");
+        var live = SettingsSvc.Current;
+        live.ConsoleUser = u;
+        await SettingsSvc.SaveAsync(live);
+        _s.ConsoleUser = _consoleUser = u;
+        Say("Usuário do terminal salvo.");
+    });
+
+    private Task GenerateConsoleKeyAsync() => Guard(async () =>
+    {
+        _busy = true;
+        try { _consolePub = await Secrets.GenerateConsoleKeyAsync(default); }
+        finally { _busy = false; }
+        Say("Novo par ed25519 do terminal gerado; a privada ficou só no cofre.");
+    });
+
+    private Task PasteConsoleKeyAsync() => Guard(async () =>
+    {
+        await Secrets.SetConsoleKeyAsync(_conPriv, _conPub, _conPass, _conCert, default);
+        _conPriv = _conPub = _conPass = _conCert = "";
+        Say("Chave do terminal validada e gravada no cofre.");
     });
 
     private Task SaveGeneralAsync() => Guard(async () =>

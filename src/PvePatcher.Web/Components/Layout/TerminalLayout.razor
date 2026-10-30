@@ -1,0 +1,23 @@
+@inherits LayoutComponentBase
+@inject VaultMonitor Vault
+
+@* Layout de tela cheia do terminal: sem menu lateral, só uma barra fina para voltar ao app. *@
+<div class="term-layout">
+    <header class="term-top">
+        <a href="" class="brand">pve-patcher</a>
+        <span class="muted">Terminal SSH</span>
+        <span class="grow"></span>
+        <AuthorizeView><span class="muted">@context.User.Identity?.Name</span></AuthorizeView>
+    </header>
+    @if (!Vault.IsReady)
+    {
+        <div class="banner">@Vault.Banner</div>
+    }
+    <main class="term-main">@Body</main>
+</div>
+
+<div id="blazor-error-ui" data-nosnippet>
+    Ocorreu um erro inesperado.
+    <a href=".">Recarregar</a>
+    <span class="dismiss">🗙</span>
+</div>

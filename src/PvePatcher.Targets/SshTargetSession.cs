@@ -11,7 +11,7 @@ public sealed class SshTargetSession(SshClient client, string hostKeySha256) : I
     public async Task<CommandResult> RunAgentAsync(string subcommand, IReadOnlyList<string> args, Action<string>? onLine, TimeSpan timeout, CancellationToken ct)
     {
         var user = client.ConnectionInfo.Username;
-        var text = ShellQuote.BuildAgentCommand(subcommand, args, user);
+        var text = ShellQuote.BuildAgentCommand(subcommand, args);
         using var cmd = client.CreateCommand(text, Encoding.UTF8);
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(timeout);
@@ -62,10 +62,11 @@ public sealed class SshTargetSession(SshClient client, string hostKeySha256) : I
             || stderr.Contains("sudo: a terminal is required", StringComparison.Ordinal)
             || stderr.Contains("requiretty", StringComparison.OrdinalIgnoreCase)
             || stderr.Contains("is not in the sudoers", StringComparison.Ordinal)
+            || stderr.Contains("not allowed to set the following environment variables", StringComparison.Ordinal)
             || stderr.Contains("sudo: command not found", StringComparison.Ordinal)
             || (exit == 127 && stderr.Contains("sudo: not found", StringComparison.Ordinal));
         return sudo
-            ? $"A conta '{user}' precisa ser root ou ter sudo NOPASSWD (sem requiretty) na VM."
+            ? $"A conta '{user}' precisa ser root, ter sido preparada pelo comando de bootstrap (rode-o de novo se o app foi atualizado) ou ter sudo NOPASSWD sem requiretty na VM."
             : null;
     }
 

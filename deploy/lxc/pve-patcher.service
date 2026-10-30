@@ -12,7 +12,11 @@ ExecStart=/opt/pve-patcher/PvePatcher.Web
 Restart=on-failure
 RestartSec=5
 
-Environment=ASPNETCORE_URLS=http://0.0.0.0:8080
+# HTTPS na 8443 com o certificado de /etc/pve-patcher/tls (deploy/lxc/tls-selfsigned.sh); a 8080 só redireciona.
+Environment=ASPNETCORE_HTTPS_PORTS=8443
+Environment=ASPNETCORE_HTTP_PORTS=8080
+Environment=Kestrel__Certificates__Default__Path=/etc/pve-patcher/tls/cert.pem
+Environment=Kestrel__Certificates__Default__KeyPath=/etc/pve-patcher/tls/key.pem
 Environment=ASPNETCORE_ENVIRONMENT=Production
 Environment=DOTNET_NOLOGO=1
 Environment=DOTNET_CLI_TELEMETRY_OPTOUT=1

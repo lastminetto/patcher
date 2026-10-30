@@ -14,6 +14,23 @@ public interface IJobExecutor
 public static class VaultMessages
 {
     public const string Sealed = "Cofre selado — rode unseal no LXC";
+    public const string AuthFailed = "Cofre: falha de autenticação do serviço (AppRole) — verifique /etc/pve-patcher/approle e o init-openbao";
+    public const string Unreachable = "Cofre inacessível — verifique o serviço openbao no LXC";
+
+    /// <summary>Mensagem do estado real (selado, inacessível ou AppRole recusado), com o detalhe quando houver.</summary>
+    public static string For(VaultStatus s)
+    {
+        var baseMsg = s.State switch
+        {
+            VaultState.Sealed => Sealed,
+            VaultState.AuthFailed => AuthFailed,
+            VaultState.Ready => "Cofre disponível",
+            _ => Unreachable,
+        };
+        return string.IsNullOrWhiteSpace(s.Detail) || s.State == VaultState.Sealed ? baseMsg : $"{baseMsg} ({s.Detail})";
+    }
+
+    public static string For(VaultUnavailableException ex) => For(ex.Status);
 }
 
 /// <summary>Worker único: consome a fila e nunca executa dois jobs ao mesmo tempo.</summary>
@@ -44,10 +61,10 @@ public sealed class JobRunner(JobQueue queue, IJobExecutor executor, ILogger<Job
             status = JobStatus.Cancelled;
             message = "Cancelado.";
         }
-        catch (VaultUnavailableException)
+        catch (VaultUnavailableException ex)
         {
             status = JobStatus.Failed;
-            message = VaultMessages.Sealed;
+            message = VaultMessages.For(ex);
         }
         catch (JobFailedException ex)
         {

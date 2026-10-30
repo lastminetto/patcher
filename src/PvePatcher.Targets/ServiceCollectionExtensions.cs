@@ -10,6 +10,7 @@ public static class ServiceCollectionExtensions
     {
         services.AddOptions<SshOptions>().Bind(config.GetSection("Ssh"));
         services.AddSingleton<ITargetConnector, SshTargetConnector>();
+        services.AddSingleton<IConsoleConnector, SshConsoleConnector>();
         services.AddSingleton<IHostScanner, HostScanner>();
         services.AddSingleton<IHostUpdater, HostUpdater>();
         return services;

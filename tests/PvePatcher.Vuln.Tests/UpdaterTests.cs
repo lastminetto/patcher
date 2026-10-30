@@ -127,7 +127,7 @@ public class UpdaterTests : IDisposable
         Assert.Equal(0.93, before.Epss);
         Assert.Equal(Severity.Critical, before.Severity);
 
-        await updater.EnrichAsync(["CVE-2023-4863", "CVE-2024-99999", "lixo"], default);
+        await updater.EnrichAsync(["CVE-2023-4863", "CVE-2024-99999", "lixo"], null, default);
         var after = Assert.Single(await matcher.MatchAsync(scan, new SeverityThresholds(), default));
         Assert.Equal(8.8, after.Cvss); // Primary vence Secondary
         Assert.Equal("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H", after.CvssVector);
@@ -140,12 +140,12 @@ public class UpdaterTests : IDisposable
     public async Task Enrich_UsaApiKeyDoCofre_ESegueSemKeyQuandoCofreFalha()
     {
         var (http, updater) = Build(new FakeSecrets(new Dictionary<string, string> { [SecretPaths.ApiKey] = "k-123" }));
-        await updater.EnrichAsync(["CVE-2023-4863"], default);
+        await updater.EnrichAsync(["CVE-2023-4863"], null, default);
         var req = Assert.Single(http.Requests);
         Assert.Equal("k-123", req.Headers.GetValues("apiKey").Single());
 
         var (http2, updater2) = Build(new FakeSecrets(null));
-        await updater2.EnrichAsync(["CVE-2023-4864"], default);
+        await updater2.EnrichAsync(["CVE-2023-4864"], null, default);
         Assert.Single(http2.Requests);
         Assert.False(http2.Requests[0].Headers.Contains("apiKey"));
     }
@@ -165,9 +165,9 @@ public class UpdaterTests : IDisposable
         opts.NvdWindow = TimeSpan.FromMilliseconds(50);
         var updater = new VulnFeedUpdater(_t.Db, Microsoft.Extensions.Options.Options.Create(opts), http);
 
-        await updater.EnrichAsync(["CVE-2024-0001", "CVE-2024-0002", "CVE-2024-0003"], default);
+        await updater.EnrichAsync(["CVE-2024-0001", "CVE-2024-0002", "CVE-2024-0003"], null, default);
         Assert.Equal(3, calls);
-        await updater.EnrichAsync(["CVE-2024-0001", "CVE-2024-0003"], default);
+        await updater.EnrichAsync(["CVE-2024-0001", "CVE-2024-0003"], null, default);
         Assert.Equal(3, calls);
 
         var nvd = (await updater.GetStatusAsync(default)).Single(s => s.Name == "nvd");
@@ -185,10 +185,37 @@ public class UpdaterTests : IDisposable
         var updater = new VulnFeedUpdater(_t.Db, Microsoft.Extensions.Options.Options.Create(opts), http);
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        await updater.EnrichAsync(["CVE-2024-0001", "CVE-2024-0002", "CVE-2024-0003", "CVE-2024-0004", "CVE-2024-0005"], default);
+        await updater.EnrichAsync(["CVE-2024-0001", "CVE-2024-0002", "CVE-2024-0003", "CVE-2024-0004", "CVE-2024-0005"], null, default);
         sw.Stop();
         Assert.Equal(5, http.Requests.Count);
         Assert.True(sw.Elapsed >= TimeSpan.FromMilliseconds(750), $"sem espera suficiente: {sw.Elapsed}");
+    }
+
+    [Fact]
+    public async Task Enrich_ParaNoLimiteDeTempo_EContinuaDeOndeParou()
+    {
+        var http = new StubHttpFactory(_ => Ok(Encoding.UTF8.GetBytes("""{"vulnerabilities":[{"cve":{"metrics":{"cvssMetricV31":[{"type":"Primary","cvssData":{"version":"3.1","vectorString":"CVSS:3.1/AV:N","baseScore":5.0}}]}}}]}"""), "n", "application/json"));
+        var opts = _t.Options;
+        opts.NvdWindow = TimeSpan.FromMilliseconds(300);
+        opts.NvdRequestsWithoutKey = 1;
+        opts.NvdBudgetPerScan = TimeSpan.FromMilliseconds(500);
+        var updater = new VulnFeedUpdater(_t.Db, Microsoft.Extensions.Options.Options.Create(opts), http);
+        string[] cves = ["CVE-2024-0001", "CVE-2024-0002", "CVE-2024-0003", "CVE-2024-0004", "CVE-2024-0005", "CVE-2024-0006"];
+
+        var log = new List<string>();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await updater.EnrichAsync(cves, log.Add, default);
+        sw.Stop();
+        var first = http.Requests.Count;
+        Assert.InRange(first, 1, 3);
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(1.5), $"não respeitou o limite: {sw.Elapsed}");
+        Assert.Contains(log, l => l.Contains("ficam para os próximos scans"));
+        // A ordem é a recebida: os primeiros já estão em cache.
+        Assert.Contains("CVE-2024-0001", http.Requests[0].RequestUri!.Query);
+
+        opts.NvdBudgetPerScan = TimeSpan.Zero;
+        await updater.EnrichAsync(cves, null, default);
+        Assert.Equal(cves.Length, http.Requests.Count);
     }
 
     [Fact]

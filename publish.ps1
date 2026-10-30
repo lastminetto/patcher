@@ -20,7 +20,7 @@ Copy-Item (Join-Path $stage 'pve-patcher') $plain -Recurse
 # deploy/ com finais de linha LF (os scripts rodam no Linux)
 $deployDst = Join-Path $stage 'deploy'
 Copy-Item (Join-Path $root 'deploy') $deployDst -Recurse
-Get-ChildItem $deployDst -Recurse -File | Where-Object { $_.Extension -in '.sh', '.service', '.hcl' -or $_.Name -eq 'patcher-agent' } | ForEach-Object {
+Get-ChildItem $deployDst -Recurse -File | Where-Object { $_.Extension -in '.sh', '.service', '.hcl' -or $_.Name -in 'patcher-agent', 'patcher-upgrade' } | ForEach-Object {
     $text = [IO.File]::ReadAllText($_.FullName) -replace "`r`n", "`n"
     [IO.File]::WriteAllText($_.FullName, $text, (New-Object Text.UTF8Encoding($false)))
 }

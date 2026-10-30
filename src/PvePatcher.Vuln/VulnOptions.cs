@@ -16,6 +16,12 @@ public sealed class VulnOptions
     public int NvdRequestsWithoutKey { get; set; } = 5;
     public int NvdRequestsWithKey { get; set; } = 50;
 
+    /// <summary>
+    /// Tempo máximo de consultas ao NVD dentro de um scan (a fila é serial). O que faltar fica para os próximos scans;
+    /// até lá valem a severidade da distro, KEV e EPSS. Zero ou negativo = sem limite.
+    /// </summary>
+    public TimeSpan NvdBudgetPerScan { get; set; } = TimeSpan.FromMinutes(2);
+
     /// <summary>Quanto tempo esperar antes de consultar de novo um CVE que o NVD ainda não pontuou.</summary>
     public TimeSpan NvdRetryUnscored { get; set; } = TimeSpan.FromDays(3);
 }

@@ -24,7 +24,7 @@ SRC="$ROOT/pve-patcher"
 echo "==> Pacotes"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq ca-certificates curl tzdata libssl3t64 libstdc++6 zlib1g jq >/dev/null
+apt-get install -y -qq ca-certificates curl tzdata libssl3t64 libstdc++6 zlib1g jq openssl >/dev/null
 
 echo "==> Usuário e pastas"
 id pve-patcher >/dev/null 2>&1 || useradd --system --home-dir /var/lib/pve-patcher --shell /usr/sbin/nologin pve-patcher
@@ -48,6 +48,8 @@ if [ ! -f /etc/pve-patcher/appsettings.Production.json ]; then
 {
   "Data": { "Path": "/var/lib/pve-patcher/state.db" },
   "Bootstrap": {
+    "PublicBaseUrl": "",
+    "PinAppCertificate": true,
     "Clusters": [
       {
         "Id": "prod",
@@ -63,10 +65,14 @@ if [ ! -f /etc/pve-patcher/appsettings.Production.json ]; then
   }
 }
 EOF
-  echo "    criado /etc/pve-patcher/appsettings.Production.json (EDITE: endpoints do cluster)"
+  echo "    criado /etc/pve-patcher/appsettings.Production.json (EDITE: endpoints do cluster; PublicBaseUrl se as VMs alcançam o app por outro endereço)"
 fi
 chown root:pve-patcher /etc/pve-patcher/appsettings.Production.json
 chmod 0640 /etc/pve-patcher/appsettings.Production.json
+
+echo "==> Certificado TLS (HTTPS na 8443)"
+# Só cria se não existir: preserva um certificado próprio colocado em /etc/pve-patcher/tls.
+sh "$HERE/tls-selfsigned.sh"
 
 echo "==> Serviço systemd"
 install -m 0644 "$HERE/pve-patcher.service" /etc/systemd/system/pve-patcher.service
@@ -81,10 +87,13 @@ if [ "$SKIP_BAO" -eq 0 ]; then
       echo "==> OpenBao (init, unseal, AppRole). GUARDE as chaves de unseal que serão impressas."
       bash "$ROOT/deploy/openbao/init-openbao.sh"
     fi
-    [ -f "$ROOT/deploy/openbao/unseal.sh" ] && install -m 0750 "$ROOT/deploy/openbao/unseal.sh" /usr/local/sbin/pve-patcher-unseal
   else
     echo "AVISO: deploy/openbao não encontrado no tarball; instale o OpenBao manualmente."
   fi
+fi
+# Sempre (também com --skip-openbao), para as atualizações do script chegarem ao LXC.
+if [ -f "$ROOT/deploy/openbao/unseal.sh" ]; then
+  install -m 0750 "$ROOT/deploy/openbao/unseal.sh" /usr/local/sbin/pve-patcher-unseal
 fi
 
 echo "==> Iniciando"
@@ -94,11 +103,11 @@ systemctl --no-pager --lines=5 status pve-patcher || true
 
 cat <<EOF
 
-Pronto. A UI responde em http://$(hostname -I | awk '{print $1}'):8080
+Pronto. A UI responde em https://$(hostname -I | awk '{print $1}'):8443 (certificado autoassinado; a 8080 redireciona)
 Próximos passos:
   1. Edite /etc/pve-patcher/appsettings.Production.json (endpoints do cluster) e rode: systemctl restart pve-patcher
   2. Em cada cluster PVE:  deploy/proxmox/pve-role.sh  (imprime o token)
   3. Grave o token: na UI (Configurações > Clusters, após o login) ou com deploy/lxc/set-cluster-token.sh
-  4. Em cada VM: adicione a chave pública (Configurações > Chave SSH) ao authorized_keys de uma conta root ou com sudo NOPASSWD
+  4. Em cada VM, como root: o comando de bootstrap de Configurações > Chave SSH (cria o usuário patcher com sudo só para update/upgrade/reboot)
   5. Após cada reboot do LXC o cofre volta selado: rode o unseal (pve-patcher-unseal).
 EOF

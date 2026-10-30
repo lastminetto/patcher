@@ -38,9 +38,12 @@ public static class SecretPaths
     public const string SshDefault = "ssh/default";
     /// <summary>Override por VM, mesmas chaves de SshDefault (+ user opcional).</summary>
     public static string SshVm(string clusterId, int vmId) => $"ssh/vm/{clusterId}/{vmId}";
+    /// <summary>Chave exclusiva do terminal da UI. Mesmas chaves de SshDefault + certificate (OpenSSH "-cert.pub", opcional).</summary>
+    public const string SshConsole = "ssh/console";
     public const string PrivateKey = "private_key";
     public const string PublicKey = "public_key";
     public const string Passphrase = "passphrase";
+    public const string Certificate = "certificate";
     public const string User = "user";
 
     /// <summary>Chave: api_key.</summary>

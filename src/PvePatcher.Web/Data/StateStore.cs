@@ -7,7 +7,13 @@ namespace PvePatcher.Web.Data;
 /// <summary>Configurações editáveis na UI (uma linha JSON). Segredos nunca entram aqui.</summary>
 public sealed class AppSettings
 {
-    public string SshUser { get; set; } = "root";
+    public string SshUser { get; set; } = "patcher";
+    /// <summary>Usuário do terminal da UI (chave ssh/console), o mesmo para todas as VMs.</summary>
+    public string ConsoleUser { get; set; } = "root";
+    /// <summary>URL do app vista pelas VMs no comando de bootstrap; vazio = Bootstrap:PublicBaseUrl do appsettings.</summary>
+    public string BootstrapBaseUrl { get; set; } = "";
+    /// <summary>Verificação TLS do curl do bootstrap: "pin", "ca" ou vazio (= Bootstrap:PinAppCertificate).</summary>
+    public string BootstrapTls { get; set; } = "";
     public List<string> PreferredNetworks { get; set; } = [];
     public string ScanCron { get; set; } = "0 3 * * *";
     public string TimeZone { get; set; } = "America/Sao_Paulo";

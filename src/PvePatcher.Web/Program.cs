@@ -53,11 +53,17 @@ builder.Services.AddScoped<CurrentUser>();
 builder.Services.AddSingleton<VaultMonitor>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<VaultMonitor>());
 builder.Services.AddSingleton<VmIpService>();
+builder.Services.AddSingleton<VmConnectionResolver>();
 builder.Services.AddSingleton<VmSshService>();
 builder.Services.AddSingleton<IVmSessionProvider>(sp => sp.GetRequiredService<VmSshService>());
 builder.Services.AddSingleton<IVmScanner, VmScanService>();
 builder.Services.AddSingleton<DiscoveryService>();
 builder.Services.AddSingleton<SecretsService>();
+builder.Services.AddSingleton<AppCertificatePin>();
+// Terminal SSH da UI (chave ssh/console).
+builder.Services.AddOptions<ConsoleOptions>().Bind(builder.Configuration.GetSection("Console"));
+builder.Services.AddSingleton<ConsoleSessionRegistry>();
+builder.Services.AddSingleton<ConsoleService>();
 builder.Services.AddSingleton<JobQueue>();
 builder.Services.AddSingleton<IJobExecutor, JobExecutor>();
 builder.Services.AddSingleton<OperationsService>();
@@ -70,8 +76,9 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<SchedulerService>(
 if (!builder.Configuration.GetValue<bool>("Dev:UseFakes"))
 {
     builder.Services.AddPvePatcherIntegrations(builder.Configuration); // ISecretStore, IProxmoxClient, IProxmoxAuth, IIpSelector
-    builder.Services.AddPvePatcherTargets(builder.Configuration);      // ITargetConnector, IHostScanner, IHostUpdater
+    builder.Services.AddPvePatcherTargets(builder.Configuration);      // ITargetConnector, IConsoleConnector, IHostScanner, IHostUpdater
     builder.Services.AddPvePatcherVuln(builder.Configuration);         // IVulnerabilityMatcher, IVulnFeedUpdater
+    builder.Services.AddSingleton<IBootstrapScriptProvider, TargetsBootstrapScriptProvider>();
 }
 else
 {
@@ -87,6 +94,8 @@ else
     builder.Services.AddSingleton<IHostUpdater, FakeHostUpdater>();
     builder.Services.AddSingleton<IVulnerabilityMatcher, FakeVulnMatcher>();
     builder.Services.AddSingleton<IVulnFeedUpdater, FakeFeedUpdater>();
+    builder.Services.AddSingleton<IBootstrapScriptProvider, FakeBootstrapScriptProvider>();
+    builder.Services.AddSingleton<IConsoleConnector, FakeConsoleConnector>();
 }
 
 var app = builder.Build();
@@ -98,6 +107,8 @@ var fwd = new ForwardedHeadersOptions { ForwardedHeaders = ForwardedHeaders.XFor
 fwd.KnownIPNetworks.Clear();
 fwd.KnownProxies.Clear();
 app.UseForwardedHeaders(fwd);
+// HTTP (8080) redireciona para o HTTPS do Kestrel (8443). Atrás de proxy com X-Forwarded-Proto=https não redireciona.
+app.UseHttpsRedirection();
 
 if (!app.Environment.IsDevelopment())
 {
@@ -107,9 +118,19 @@ app.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages:
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseAntiforgery();
+// Pings a cada 30 s mantêm o terminal vivo atrás de proxies com timeout de leitura.
+app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
 
 app.MapStaticAssets();
 
+// Script de bootstrap das VMs (anônimo: só texto, sem segredos), já com o patcher-upgrade embutido.
+app.MapGet("/bootstrap-vm.sh", (IBootstrapScriptProvider scripts) =>
+    Results.Text(scripts.Render(), "text/x-shellscript; charset=utf-8")).AllowAnonymous();
+// Bootstrap da conta do terminal (confere e ajusta chave, permissões e sudo); também anônimo e sem segredos.
+app.MapGet("/bootstrap-console.sh", (IBootstrapScriptProvider scripts) =>
+    Results.Text(scripts.RenderConsole(), "text/x-shellscript; charset=utf-8")).AllowAnonymous();
+
+app.MapTerminal();
 
 app.MapPost("/logout", async (HttpContext ctx) =>
 {

@@ -1,3 +1,5 @@
+using NSubstitute;
+using PvePatcher.Core;
 using Microsoft.Extensions.Logging.Abstractions;
 using PvePatcher.Web.Data;
 using PvePatcher.Web.Jobs;
@@ -83,5 +85,28 @@ public class JobRunnerTests
     {
         for (var i = 0; i < 200 && !cond(); i++) await Task.Delay(25);
         Assert.True(cond(), "timeout");
+    }
+}
+
+public class VaultMonitorTests
+{
+    [Fact]
+    public async Task Avisa_quando_o_cofre_volta_a_ficar_pronto()
+    {
+        var store = Substitute.For<ISecretStore>();
+        store.GetStatusAsync(default).ReturnsForAnyArgs(
+            new VaultStatus(VaultState.Sealed, "cofre selado"),
+            new VaultStatus(VaultState.Ready, null),
+            new VaultStatus(VaultState.Ready, null));
+        var monitor = new VaultMonitor(store, new AppEvents(),
+            NullLogger<VaultMonitor>.Instance);
+        var ready = 0;
+        monitor.BecameReady += () => ready++;
+
+        await monitor.RefreshAsync(); // selado
+        Assert.Equal(0, ready);
+        await monitor.RefreshAsync(); // unseal
+        await monitor.RefreshAsync(); // continua pronto: não repete
+        Assert.Equal(1, ready);
     }
 }

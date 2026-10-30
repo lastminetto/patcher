@@ -36,7 +36,7 @@ public sealed class DiscoveryService(
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
-                    var msg = ex is VaultUnavailableException ? VaultMessages.Sealed : ex.Message;
+                    var msg = ex is VaultUnavailableException vex ? VaultMessages.For(vex) : ex.Message;
                     log.LogWarning(ex, "Discovery do cluster {Cluster} falhou", cluster.Id);
                     errors[cluster.Id] = msg;
                     await SetClusterResultAsync(cluster.Id, msg, ct);
@@ -85,18 +85,38 @@ public sealed class DiscoveryService(
     }
 }
 
-public sealed class DiscoveryBackgroundService(DiscoveryService discovery, SettingsService settings, ILogger<DiscoveryBackgroundService> log) : BackgroundService
+public sealed class DiscoveryBackgroundService(
+    DiscoveryService discovery, SettingsService settings, VaultMonitor vault, ILogger<DiscoveryBackgroundService> log) : BackgroundService
 {
+    private readonly SemaphoreSlim _wake = new(0);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        try { await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken); } catch (OperationCanceledException) { return; }
-        while (!stoppingToken.IsCancellationRequested)
+        // Cofre voltou (unseal): roda já, senão o erro "cofre selado" fica na tela até o próximo ciclo.
+        vault.BecameReady += Wake;
+        try
         {
-            try { await discovery.RunAsync(stoppingToken); }
-            catch (OperationCanceledException) { break; }
-            catch (Exception ex) { log.LogError(ex, "Discovery periódico falhou"); }
-            try { await Task.Delay(TimeSpan.FromMinutes(Math.Clamp(settings.Current.DiscoveryMinutes, 1, 1440)), stoppingToken); }
-            catch (OperationCanceledException) { break; }
+            await _wake.WaitAsync(TimeSpan.FromSeconds(5), stoppingToken);
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try { await discovery.RunAsync(stoppingToken); }
+                catch (OperationCanceledException) { break; }
+                catch (Exception ex) { log.LogError(ex, "Discovery periódico falhou"); }
+                await _wake.WaitAsync(TimeSpan.FromMinutes(Math.Clamp(settings.Current.DiscoveryMinutes, 1, 1440)), stoppingToken);
+            }
         }
+        catch (OperationCanceledException) { }
+        finally { vault.BecameReady -= Wake; }
+    }
+
+    private void Wake()
+    {
+        if (_wake.CurrentCount == 0) _wake.Release();
+    }
+
+    public override void Dispose()
+    {
+        _wake.Dispose();
+        base.Dispose();
     }
 }

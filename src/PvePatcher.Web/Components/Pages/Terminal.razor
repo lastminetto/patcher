@@ -1,0 +1,461 @@
+@page "/terminal"
+@layout TerminalLayout
+@attribute [Authorize(Policy = "View")]
+@implements IAsyncDisposable
+@inject IJSRuntime JS
+@inject StateStore Store
+@inject ConsoleService Consoles
+@inject CurrentUser Who
+@inject VmIpService Ips
+
+<PageTitle>@(Active is { } t ? $"{t.Title} — terminal" : "Terminal — pve-patcher")</PageTitle>
+
+<div class="bar">
+    <div class="tabstrip" role="tablist">
+        @foreach (var t in _tabs)
+        {
+            <div class="tab @(t == Active ? "on" : "")" role="tab" aria-selected="@(t == Active)" title="@t.Tooltip" @onclick="() => Select(t)">
+                <span class="dot @t.Status.ToString().ToLowerInvariant()"></span>
+                <span class="tname">@t.Title</span>
+                <button class="x" title="Fechar sessão" aria-label="Fechar sessão" @onclick="() => CloseTabAsync(t)" @onclick:stopPropagation>×</button>
+            </div>
+        }
+        <button class="small" @onclick="TogglePicker">+ Nova sessão</button>
+    </div>
+    <div class="actions">
+        @if (Active is { } a)
+        {
+            <button class="small @(a.FilesOpen ? "on" : "")" @onclick="() => ToggleFilesAsync(a)">Arquivos</button>
+            <button class="small" @onclick="() => ReconnectAsync(a)" disabled="@(a.Status == TabStatus.Connecting)">Reconectar</button>
+        }
+        <button class="small" @onclick="OpenPrefsAsync">Aparência</button>
+    </div>
+</div>
+
+@if (_picker || (_tabs.Count == 0 && _ready))
+{
+    <div class="picker">
+        <input type="text" placeholder="Buscar VM por nome, VMID, cluster ou IP" @bind="_search" @bind:event="oninput" />
+        <div class="vmlist">
+            @foreach (var v in PickerItems())
+            {
+                <button class="vmrow" @onclick="() => OpenTabAsync(v.Key, v.Name)" disabled="@(v.Ip is null)" title="@(v.Ip is null ? "sem IP para conectar" : "")">
+                    <span class="name">@v.Name</span> <span class="muted">#@v.Key.VmId · @v.Cluster</span>
+                    <span class="mono muted ip">@(v.Ip ?? "sem IP")</span>
+                </button>
+            }
+            @if (!PickerItems().Any()) { <div class="muted" style="padding:.5rem">Nenhuma VM encontrada.</div> }
+        </div>
+        <p class="muted hint">Entra como <code>@_consoleUser</code> com a chave do terminal (Configurações &gt; Terminal SSH).
+            Copiar: selecione o texto (ou Ctrl+Shift+C). Colar: botão direito, Ctrl+Shift+V ou Shift+Insert.</p>
+    </div>
+}
+
+@if (_prefsOpen && _prefs is not null)
+{
+    <div class="prefs panel" role="dialog" aria-label="Aparência do terminal">
+        <h3>Aparência</h3>
+        <label class="field"><span>Fonte</span><input type="text" @bind="_prefs.FontFamily" /></label>
+        <div class="row">
+            <label>Tamanho <input type="number" min="8" max="32" @bind="_prefs.FontSize" style="width:5rem" /></label>
+            <label>Tema
+                <select @bind="_prefs.Theme">
+                    <option value="dark">Escuro</option>
+                    <option value="light">Claro</option>
+                    <option value="solarized">Solarized</option>
+                </select>
+            </label>
+            <label>Scrollback <input type="number" min="100" max="100000" step="100" @bind="_prefs.Scrollback" style="width:7rem" /></label>
+        </div>
+        <label class="check"><input type="checkbox" @bind="_prefs.CursorBlink" /> cursor piscando</label>
+        <label class="check"><input type="checkbox" @bind="_prefs.CopyOnSelect" /> copiar ao selecionar (como no PuTTY)</label>
+        <label class="check"><input type="checkbox" @bind="_prefs.RightClickPaste" /> colar com o botão direito (como no PuTTY)</label>
+        <p class="muted">Salvo neste navegador. O clipboard exige HTTPS.</p>
+        <div class="row end">
+            <button @onclick="ResetPrefsAsync">Padrão</button>
+            <button @onclick="() => _prefsOpen = false">Cancelar</button>
+            <button class="primary" @onclick="SavePrefsAsync">Aplicar</button>
+        </div>
+    </div>
+}
+
+<div class="body">
+    @foreach (var t in _tabs)
+    {
+        <div class="pane" style="display:@(t == Active ? "flex" : "none")">
+            <div class="host" @ref="t.Host"></div>
+            @if (t.FilesOpen)
+            {
+                <aside class="files">
+                    <div class="fpath">
+                        <button class="small" title="Subir um nível" @onclick="() => LoadDirAsync(t, SftpPaths.Parent(t.Dir))" disabled="@(t.Dir == "/" || t.FilesBusy)">↑</button>
+                        <input type="text" class="mono" @bind="t.DirInput" @onkeydown="e => DirKeyAsync(t, e)" aria-label="Caminho" />
+                        <button class="small" title="Atualizar" @onclick="() => LoadDirAsync(t, t.Dir)" disabled="@t.FilesBusy">⟳</button>
+                    </div>
+                    @if (t.FilesError is not null) { <div class="alert err">@t.FilesError</div> }
+                    @if (t.Upload is not null) { <div class="alert">@t.Upload</div> }
+                    <div class="flist">
+                        @foreach (var e in t.Entries)
+                        {
+                            <div class="frow">
+                                @if (t.Renaming == e.Path)
+                                {
+                                    <input type="text" class="grow" @bind="t.RenameTo" @onkeydown="k => RenameKeyAsync(t, e, k)" />
+                                    <button class="small" @onclick="() => RenameAsync(t, e)">OK</button>
+                                    <button class="small" @onclick="() => t.Renaming = null">×</button>
+                                }
+                                else if (t.Deleting == e.Path)
+                                {
+                                    <span class="grow">Apagar <strong>@e.Name</strong>?</span>
+                                    <button class="small danger" @onclick="() => DeleteAsync(t, e)">Apagar</button>
+                                    <button class="small" @onclick="() => t.Deleting = null">Não</button>
+                                }
+                                else
+                                {
+                                    @if (e.IsDirectory)
+                                    {
+                                        <button class="link grow" @onclick="() => LoadDirAsync(t, e.Path)">📁 @e.Name</button>
+                                    }
+                                    else
+                                    {
+                                        <a class="grow" href="@DownloadUrl(t, e)" download="@e.Name" title="Baixar">@e.Name</a>
+                                    }
+                                    <span class="muted size">@(e.IsDirectory ? "" : Size(e.Size))</span>
+                                    <span class="menu">
+                                        <button class="small" title="Renomear" @onclick="() => { t.Renaming = e.Path; t.RenameTo = e.Name; t.Deleting = null; }">✎</button>
+                                        <button class="small" title="Apagar" @onclick="() => { t.Deleting = e.Path; t.Renaming = null; }">🗑</button>
+                                    </span>
+                                }
+                            </div>
+                        }
+                        @if (t.Entries.Count == 0 && !t.FilesBusy && t.FilesError is null) { <div class="muted" style="padding:.4rem">Pasta vazia.</div> }
+                    </div>
+                    <div class="fops">
+                        <div class="row">
+                            <input type="text" placeholder="nova pasta" @bind="t.NewDir" class="grow" />
+                            <button class="small" @onclick="() => MkdirAsync(t)" disabled="@string.IsNullOrWhiteSpace(t.NewDir)">Criar</button>
+                        </div>
+                        <div class="row">
+                            <label class="btn small">Enviar arquivos…
+                                <input type="file" multiple hidden @ref="t.FileInput" @onchange="() => UploadAsync(t)" />
+                            </label>
+                            <label class="check"><input type="checkbox" @bind="t.Overwrite" /> sobrescrever</label>
+                        </div>
+                    </div>
+                </aside>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    [SupplyParameterFromQuery(Name = "vm")] public string? VmParam { get; set; }
+
+    private enum TabStatus { Connecting, Connected, Closed, Error }
+
+    private sealed class Tab
+    {
+        public string Id { get; } = Guid.NewGuid().ToString("N");
+        public required VmKey Key { get; init; }
+        public required string Title { get; init; }
+        public TabStatus Status { get; set; } = TabStatus.Connecting;
+        public string? Message { get; set; }
+        public bool Started { get; set; }
+        public ElementReference Host { get; set; }
+        public ElementReference FileInput { get; set; }
+        public bool FilesOpen { get; set; }
+        public bool FilesBusy { get; set; }
+        public string Dir { get; set; } = "";
+        public string DirInput { get; set; } = "";
+        public IReadOnlyList<SftpEntry> Entries { get; set; } = [];
+        public string? FilesError { get; set; }
+        public string? Upload { get; set; }
+        public string? Renaming { get; set; }
+        public string RenameTo { get; set; } = "";
+        public string? Deleting { get; set; }
+        public string NewDir { get; set; } = "";
+        public bool Overwrite { get; set; }
+        public string VmQuery => "vm=" + Uri.EscapeDataString(Key.ToString());
+        public string Tooltip => Status switch
+        {
+            TabStatus.Connected => $"{Key}: conectado",
+            TabStatus.Connecting => $"{Key}: conectando",
+            TabStatus.Error => $"{Key}: {Message}",
+            _ => $"{Key}: sessão encerrada",
+        };
+    }
+
+    /// <summary>Preferências do xterm (mesmos nomes do terminal.js, em camelCase no JSON).</summary>
+    public sealed class TermPrefs
+    {
+        public string FontFamily { get; set; } = "";
+        public int FontSize { get; set; } = 14;
+        public string Theme { get; set; } = "dark";
+        public int Scrollback { get; set; } = 5000;
+        public bool CursorBlink { get; set; } = true;
+        public bool CopyOnSelect { get; set; } = true;
+        public bool RightClickPaste { get; set; } = true;
+    }
+
+    private sealed record PickerItem(VmKey Key, string Name, string Cluster, string? Ip);
+
+    private readonly List<Tab> _tabs = [];
+    private readonly CancellationTokenSource _cts = new();
+    private Tab? _active;
+    private Tab? Active => _active;
+    private List<PickerItem> _vmItems = [];
+    private string _search = "", _consoleUser = "";
+    private bool _picker, _prefsOpen, _ready, _fitActive;
+    private TermPrefs? _prefs;
+    private UserInfo? _user;
+    private IJSObjectReference? _module;
+    private DotNetObjectReference<Terminal>? _self;
+
+    [Inject] private SettingsService SettingsSvc { get; set; } = default!;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _user = await Who.GetAsync();
+        _consoleUser = SettingsSvc.Current.ConsoleUser;
+        var clusters = (await Store.GetClustersAsync()).ToDictionary(c => c.Id, c => c.Name);
+        _vmItems = (await Store.GetVmsAsync())
+            .Select(v => new PickerItem(new VmKey(v.ClusterId, v.VmId), v.Name, clusters.GetValueOrDefault(v.ClusterId, v.ClusterId), Ips.Resolve(v)?.ToString()))
+            .OrderBy(v => v.Name, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private IEnumerable<PickerItem> PickerItems()
+    {
+        var s = _search.Trim();
+        var q = s.Length == 0 ? _vmItems : _vmItems.Where(v =>
+            v.Name.Contains(s, StringComparison.OrdinalIgnoreCase) || v.Key.VmId.ToString().Contains(s)
+            || v.Cluster.Contains(s, StringComparison.OrdinalIgnoreCase) || (v.Ip?.Contains(s) ?? false));
+        return q.Take(60);
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            _module = await JS.InvokeAsync<IJSObjectReference>("import", "./js/terminal.js");
+            _self = DotNetObjectReference.Create(this);
+            _prefs = await _module.InvokeAsync<TermPrefs>("init");
+            _ready = true;
+            if (TerminalProtocol.TryParseVm(VmParam, out var key))
+            {
+                var name = _vmItems.FirstOrDefault(v => v.Key == key)?.Name ?? key.ToString();
+                await OpenTabAsync(key, name);
+            }
+            else StateHasChanged();
+            return;
+        }
+        if (_module is null) return;
+        foreach (var t in _tabs.Where(t => !t.Started).ToList())
+        {
+            t.Started = true;
+            await _module.InvokeVoidAsync("open", t.Id, t.Host, t.VmQuery, _self);
+        }
+        if (_fitActive && _active is { } a)
+        {
+            _fitActive = false;
+            await _module.InvokeVoidAsync("fit", a.Id);
+        }
+    }
+
+    private Task OpenTabAsync(VmKey key, string name)
+    {
+        var same = _tabs.Count(t => t.Key == key);
+        var tab = new Tab { Key = key, Title = same == 0 ? name : $"{name} ({same + 1})" };
+        _tabs.Add(tab);
+        _active = tab;
+        _picker = false;
+        _search = "";
+        StateHasChanged(); // o OnAfterRender abre o terminal quando o elemento existir
+        return Task.CompletedTask;
+    }
+
+    private void TogglePicker() => _picker = !_picker;
+
+    private void Select(Tab t)
+    {
+        _active = t;
+        _fitActive = true;
+    }
+
+    private async Task CloseTabAsync(Tab t)
+    {
+        if (_module is not null) await _module.InvokeVoidAsync("close", t.Id);
+        var i = _tabs.IndexOf(t);
+        _tabs.Remove(t);
+        if (_active == t)
+        {
+            _active = _tabs.Count == 0 ? null : _tabs[Math.Min(i, _tabs.Count - 1)];
+            _fitActive = true;
+        }
+    }
+
+    private async Task ReconnectAsync(Tab t)
+    {
+        if (_module is null) return;
+        t.Status = TabStatus.Connecting;
+        t.Message = null;
+        await _module.InvokeVoidAsync("open", t.Id, t.Host, t.VmQuery, _self);
+    }
+
+    [JSInvokable]
+    public Task OnStatus(string id, string status, string? message) => InvokeAsync(() =>
+    {
+        if (_tabs.FirstOrDefault(x => x.Id == id) is not { } t) return;
+        t.Status = status switch { "connected" => TabStatus.Connected, "error" => TabStatus.Error, _ => TabStatus.Closed };
+        t.Message = message;
+        StateHasChanged();
+    });
+
+    // --- arquivos (SFTP) -------------------------------------------------------
+
+    private string AppUser => _user?.UserId ?? "?";
+
+    private async Task ToggleFilesAsync(Tab t)
+    {
+        t.FilesOpen = !t.FilesOpen;
+        _fitActive = true;
+        if (t.FilesOpen && t.Dir.Length == 0) await LoadDirAsync(t, null);
+    }
+
+    private async Task LoadDirAsync(Tab t, string? path)
+    {
+        t.FilesBusy = true;
+        t.FilesError = null;
+        try
+        {
+            var (dir, list) = await Consoles.WithSftpAsync(AppUser, t.Key, "", async s =>
+            {
+                var p = SftpPaths.Normalize(path, s.Home);
+                return (p, await s.ListAsync(p, _cts.Token));
+            }, _cts.Token);
+            t.Dir = t.DirInput = dir;
+            t.Entries = list;
+        }
+        catch (JobFailedException ex) { t.FilesError = ex.Message; t.DirInput = t.Dir; }
+        finally { t.FilesBusy = false; }
+    }
+
+    private async Task DirKeyAsync(Tab t, KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await LoadDirAsync(t, t.DirInput);
+    }
+
+    private string DownloadUrl(Tab t, SftpEntry e) => $"terminal/sftp/download?{t.VmQuery}&path={Uri.EscapeDataString(e.Path)}";
+
+    private async Task SftpActionAsync(Tab t, string what, Func<ISftpSession, Task> action)
+    {
+        t.FilesError = null;
+        try { await Consoles.WithSftpAsync(AppUser, t.Key, what, action, _cts.Token); }
+        catch (Exception ex) when (ex is JobFailedException or ArgumentException) { t.FilesError = ex.Message; return; }
+        await LoadDirAsync(t, t.Dir);
+    }
+
+    private Task MkdirAsync(Tab t)
+    {
+        var name = t.NewDir.Trim();
+        if (!SftpPaths.IsValidName(name)) { t.FilesError = "Nome de pasta inválido."; return Task.CompletedTask; }
+        t.NewDir = "";
+        var path = SftpPaths.Combine(t.Dir, name);
+        return SftpActionAsync(t, $"mkdir {path}", s => s.CreateDirectoryAsync(path, _cts.Token));
+    }
+
+    private async Task RenameKeyAsync(Tab t, SftpEntry e, KeyboardEventArgs k)
+    {
+        if (k.Key == "Enter") await RenameAsync(t, e);
+        else if (k.Key == "Escape") t.Renaming = null;
+    }
+
+    private Task RenameAsync(Tab t, SftpEntry e)
+    {
+        var name = t.RenameTo.Trim();
+        t.Renaming = null;
+        if (name == e.Name) return Task.CompletedTask;
+        if (!SftpPaths.IsValidName(name)) { t.FilesError = "Nome inválido."; return Task.CompletedTask; }
+        var to = SftpPaths.Combine(SftpPaths.Parent(e.Path), name);
+        return SftpActionAsync(t, $"rename {e.Path} -> {to}", s => s.RenameAsync(e.Path, to, _cts.Token));
+    }
+
+    private Task DeleteAsync(Tab t, SftpEntry e)
+    {
+        t.Deleting = null;
+        return SftpActionAsync(t, $"delete {e.Path}", s => s.DeleteAsync(e.Path, _cts.Token));
+    }
+
+    private async Task UploadAsync(Tab t)
+    {
+        if (_module is null) return;
+        t.FilesError = null;
+        t.Upload = "Enviando…";
+        await _module.InvokeVoidAsync("upload", t.Id, t.FileInput, t.VmQuery, t.Dir, t.Overwrite, _self);
+    }
+
+    [JSInvokable]
+    public Task OnUploadProgress(string id, string name, int percent) => InvokeAsync(() =>
+    {
+        if (_tabs.FirstOrDefault(x => x.Id == id) is not { } t) return;
+        t.Upload = $"Enviando {name}: {percent}%";
+        StateHasChanged();
+    });
+
+    [JSInvokable]
+    public Task OnUploadDone(string id, string name, string? error) => InvokeAsync(async () =>
+    {
+        if (_tabs.FirstOrDefault(x => x.Id == id) is not { } t) return;
+        t.Upload = null;
+        if (error is not null) t.FilesError = $"{name}: {error}";
+        else await LoadDirAsync(t, t.Dir);
+        StateHasChanged();
+    });
+
+    private static string Size(long b) => b switch
+    {
+        < 1024 => $"{b} B",
+        < 1024 * 1024 => $"{b / 1024.0:0.#} KB",
+        < 1024L * 1024 * 1024 => $"{b / 1024.0 / 1024:0.#} MB",
+        _ => $"{b / 1024.0 / 1024 / 1024:0.##} GB",
+    };
+
+    // --- aparência ------------------------------------------------------------
+
+    private async Task OpenPrefsAsync()
+    {
+        if (_module is null) return;
+        _prefs = await _module.InvokeAsync<TermPrefs>("init");
+        _prefsOpen = true;
+    }
+
+    private async Task SavePrefsAsync()
+    {
+        if (_module is null || _prefs is null) return;
+        _prefs.FontSize = Math.Clamp(_prefs.FontSize, 8, 32);
+        _prefs.Scrollback = Math.Clamp(_prefs.Scrollback, 100, 100_000);
+        await _module.InvokeVoidAsync("setPrefs", _prefs);
+        _prefsOpen = false;
+    }
+
+    private async Task ResetPrefsAsync()
+    {
+        if (_module is null) return;
+        _prefs = await _module.InvokeAsync<TermPrefs>("getDefaults");
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await _cts.CancelAsync();
+        try
+        {
+            if (_module is not null)
+            {
+                await _module.InvokeVoidAsync("closeAll");
+                await _module.DisposeAsync();
+            }
+        }
+        catch (JSDisconnectedException) { /* circuito já caiu: o navegador fecha os WebSockets sozinho */ }
+        _self?.Dispose();
+        _cts.Dispose();
+    }
+}

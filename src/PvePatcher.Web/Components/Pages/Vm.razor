@@ -30,6 +30,7 @@
     <span class="badge @st.Css">@st.Text</span>
     @if (_vm.RebootRequired) { <span class="badge b-warn">reboot pendente</span> }
     <span class="grow"></span>
+    <a class="btn" href="terminal?vm=@Uri.EscapeDataString($"{_vm.ClusterId}/{_vm.VmId}")" target="_blank" title="Abre um terminal SSH em outra aba">Terminal ↗</a>
     <button @onclick="ScanAsync" disabled="@(!_can)">Escanear</button>
     <button class="primary" @onclick="() => _dialog = true" disabled="@(!_can)">Atualizar…</button>
 </div>
@@ -130,7 +131,7 @@ else if (_tab == "net")
         <button class="primary" @onclick="SaveNetworkAsync">Salvar</button>
         </fieldset>
         <p class="muted">IP efetivo atual: <span class="mono">@(ip ?? "nenhum (sem IP)")</span></p>
-        <p class="muted">SSH sem agente: nada fica instalado na VM; o app entra com a conta de Configurações e envia o script pela conexão a cada execução (conta root ou com sudo NOPASSWD).</p>
+        <p class="muted">SSH sem agente: o app entra com a conta de Configurações e envia o script pela conexão a cada execução. Prepare a VM com o comando de bootstrap (Configurações > Chave SSH): usuário com sudo só para update/upgrade/reboot. Root ou conta com sudo NOPASSWD também funcionam.</p>
     </div>
     <div class="tablewrap"><table>
         <thead><tr><th></th><th>Interface</th><th>MAC</th><th>Endereços (guest agent)</th></tr></thead>

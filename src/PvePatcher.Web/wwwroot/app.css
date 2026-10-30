@@ -84,3 +84,6 @@ tr.sel { background: var(--panel2); }
 #blazor-error-ui { color-scheme: light only; background: lightyellow; bottom: 0; box-shadow: 0 -1px 2px rgba(0,0,0,.2); box-sizing: border-box; display: none; left: 0; padding: .6rem 1.25rem .7rem; position: fixed; width: 100%; z-index: 1000; color: #000; }
 #blazor-error-ui .dismiss { cursor: pointer; position: absolute; right: .75rem; top: .5rem; }
 .validation-message { color: var(--crit); }
+.btn.small, a.btn.small { padding: .1rem .5rem; font-size: .82rem; }
+a.ssh-btn { white-space: nowrap; font-weight: 600; }
+a.btn { display: inline-block; text-decoration: none; }

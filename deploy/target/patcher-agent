@@ -1,7 +1,9 @@
 #!/bin/sh
 # patcher-agent: script enviado pelo stdin da conexao SSH a cada execucao
-# ("sh -s -- <subcomando> [args]", com sudo -n quando o usuario nao e root).
+# ("sh -s -- <subcomando> [args]", sempre com o usuario da conexao).
 # Nada e gravado em disco na VM. Subcomandos fixos e argumentos validados.
+# Sem root, so os passos privilegiados usam "sudo -n", um comando por vez e com os
+# argumentos exatos das regras que o bootstrap-vm.sh grava no sudoers (mude os dois juntos).
 # POSIX sh (busybox ash incluido). Suporta apt, dnf e apk.
 #
 # IMPORTANTE: com "sh -s" o script e lido do stdin. Todo o codigo fica em funcoes
@@ -17,6 +19,7 @@ export LC_ALL
 
 PROTOCOL=1
 LOCK=/run/patcher-agent.lock
+WRAPPER=/usr/local/sbin/patcher-upgrade
 
 die() { echo "patcher-agent: $1" >&2; exit "${2:-1}"; }
 
@@ -34,26 +37,50 @@ detect_family() {
     esac
 }
 
+is_root() { [ "$(id -u)" -eq 0 ]; }
+
 # Evita dois refresh/upgrades simultaneos (sem flock, segue sem lock).
+# Sem root nao da para criar em /run: o lock fica no home (apt/dnf/apk tem lock proprio).
 take_lock() {
     command -v flock >/dev/null 2>&1 || return 0
-    exec 9>"$LOCK"
+    if is_root; then lock=$LOCK; else lock="${HOME:-/tmp}/.patcher-agent.lock"; fi
+    exec 9>"$lock"
     flock -n 9 || die "outra execucao do patcher-agent em andamento" 75
 }
 
-apt_env() {
-    DEBIAN_FRONTEND=noninteractive
-    NEEDRESTART_MODE=a
-    APT_LISTCHANGES_FRONTEND=none
-    export DEBIAN_FRONTEND NEEDRESTART_MODE APT_LISTCHANGES_FRONTEND
+# Caminho absoluto de um comando (o sudoers casa pelo caminho).
+bin_path() {
+    command -v "$1" 2>/dev/null || die "$1 nao encontrado"
 }
 
-# Valida nome de pacote: estrito, sem iniciar com "-".
+# Roda como root: direto se ja for root, senao "sudo -n" (nunca pede senha).
+priv() {
+    if is_root; then "$@"; else sudo -n "$@"; fi
+}
+
+# priv com o comando pelo nome: priv_bin dnf -y upgrade.
+priv_bin() {
+    b=$(bin_path "$1")
+    shift
+    priv "$b" "$@"
+}
+
+# apt-get como root, nao interativo. Sob sudo o env vai na linha de comando
+# (o sudoers do bootstrap libera essas tres variaveis em env_keep).
+priv_apt() {
+    b=$(bin_path apt-get)
+    if is_root; then
+        DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none "$b" "$@"
+    else
+        sudo -n DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none "$b" "$@"
+    fi
+}
+
+# Valida nome de pacote: estrito, sem iniciar com "-", sem espacos nem quebras de linha.
 valid_pkg() {
     case "$1" in
-        ''|-*) return 1 ;;
+        ''|[!A-Za-z0-9]*|*[!A-Za-z0-9.+_:-]*) return 1 ;;
     esac
-    printf '%s\n' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9.+_:-]*$'
 }
 
 cmd_osinfo() {
@@ -68,9 +95,9 @@ cmd_osinfo() {
 cmd_refresh() {
     take_lock
     case "$FAMILY" in
-        apt) apt_env; apt-get -q -o Dpkg::Use-Pty=0 update ;;
-        dnf) dnf -q makecache ;;
-        apk) apk update ;;
+        apt) priv_apt -q -o Dpkg::Use-Pty=0 update ;;
+        dnf) priv_bin dnf -q makecache ;;
+        apk) priv_bin apk update ;;
     esac
 }
 
@@ -214,11 +241,9 @@ cmd_reboot_required() {
 cmd_upgrade_all() {
     take_lock
     case "$FAMILY" in
-        apt)
-            apt_env
-            apt-get -y -q -o Dpkg::Use-Pty=0 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade ;;
-        dnf) dnf -y upgrade ;;
-        apk) apk upgrade --no-progress ;;
+        apt) priv_apt -y -q -o Dpkg::Use-Pty=0 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade ;;
+        dnf) priv_bin dnf -y upgrade ;;
+        apk) priv_bin apk upgrade --no-progress ;;
     esac
 }
 
@@ -228,21 +253,32 @@ cmd_upgrade_pkgs() {
         valid_pkg "$p" || die "nome de pacote invalido: $p" 64
     done
     take_lock
+    # Usuario restrito do bootstrap: o sudoers so libera o wrapper (que valida os nomes de novo).
+    if ! is_root && [ -x "$WRAPPER" ]; then
+        sudo -n "$WRAPPER" "$@"
+        return
+    fi
+    # Root ou conta com sudo total sem bootstrap.
     case "$FAMILY" in
-        apt)
-            apt_env
-            apt-get -y -q -o Dpkg::Use-Pty=0 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install --only-upgrade "$@" ;;
-        dnf) dnf -y upgrade "$@" ;;
-        apk) apk upgrade --no-progress "$@" ;;
+        apt) priv_apt -y -q -o Dpkg::Use-Pty=0 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install --only-upgrade "$@" ;;
+        dnf) priv_bin dnf -y upgrade "$@" ;;
+        apk) priv_bin apk upgrade --no-progress "$@" ;;
     esac
 }
 
 cmd_reboot() {
     if [ -d /run/systemd/system ]; then
-        ( sleep 2; systemctl reboot ) >/dev/null 2>&1 </dev/null &
+        b=$(bin_path systemctl)
+        set -- "$b" reboot
     else
-        ( sleep 2; reboot ) >/dev/null 2>&1 </dev/null &
+        b=$(bin_path reboot)
+        set -- "$b"
     fi
+    # O reboot roda em segundo plano: confere antes se o sudo permite, senao o erro se perderia.
+    if ! is_root; then
+        sudo -n -l "$@" >/dev/null 2>&1 || die "sudo: a password is required (reboot nao liberado para $(id -un))"
+    fi
+    ( sleep 2; priv "$@" ) >/dev/null 2>&1 </dev/null &
     echo "reboot agendado"
 }
 
